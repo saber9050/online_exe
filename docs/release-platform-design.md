@@ -1,6 +1,6 @@
 # 内网客户端发版平台 · 方案设计
 
-> 版本：v2.4（内网部署 · Docker 单容器 · 双人协作 · 两页结构）　日期：2026-11-05　模块名：`online_exe`
+> 版本：v2.5（内网部署 · Docker 单容器 · 双人协作 · 两页结构 · 审查修订）　日期：2026-11-05　模块名：`online_exe`
 
 ## 变更记录
 
@@ -12,6 +12,7 @@
 | v2.2 | 2026-11-05 | **两人开发**：新增第 7 节分工（契约冻结 / 模块划分 / 并行时序 / 协作约定 / 验收清单 / 备选方案）；补充 4.7 前端技术栈 |
 | v2.3 | 2026-11-05 | **页面收敛为两页**：下载页 `/` 只读、只负责下载；原上传页 `/upload` 与版本管理区 `/manage` 合并为管理页 `/admin`（上传 + 版本列表同页） |
 | v2.4 | 2026-11-05 | 新增 4.9 容量上限与耗时参考：单包默认 2GB、流式上传内存恒定、三层限制拆解、不同单包大小的配置建议、总容量换算 |
+| v2.5 | 2026-11-05 | **审查修订**：新增 4.0 服务端运行基线（HTTP 超时 / 启动三态 / tmp 清理 / 启动对账）；**砍掉 overwrite**，改为版本号严格不可变；上传加进程锁与唯一临时名；downloads 单源改为 stats.json；补 /admin CIDR 白名单、healthz 磁盘探针、存储结构与 DTO 分离 |
 
 ---
 
@@ -99,7 +100,7 @@
 
 | 层 | 选型 | 理由 |
 |---|---|---|
-| 语言 | **Go 1.22+**（当前 go.mod 为 1.26） | 单容器镜像 8–15MB、静态链接无运行时、`embed` 打包前端 |
+| 语言 | **Go 1.26**（以 `go.mod` 为准，Dockerfile 的基础镜像必须同版本） | 单容器镜像 8–15MB、静态链接无运行时、`embed` 打包前端 |
 | 路由 | **标准库 `net/http.ServeMux`** | Go 1.22 起原生支持 `GET /dl/{version}/{os}-{arch}` 路径参数，chi / gin 全部不必要 |
 | 元数据 | **JSON 文件 + 内存索引** | 数据量几百条，SQLite 属于过度设计；JSON 让整个程序零第三方依赖 |
 | 文件存储 | 本地磁盘，`Storage` 接口（仅 local 实现） | 留接口是为了以后真要换存储时不动上层，不写多余实现 |
@@ -144,6 +145,84 @@
 
 ## 4. 详细设计
 
+### 4.0 服务端运行基线
+
+这一节写的是「实现时必须遵守、写错就会在线上出事」的底层参数，放在最前面，避免实现的人各写各的。
+
+#### 4.0.1 HTTP 超时
+
+大文件上传下载与常规 Web 服务的超时策略完全相反。**设错任何一个都是灾难**：
+
+| 参数 | 值 | 不这么设的后果 |
+|---|---|---|
+| `ReadHeaderTimeout` | `10s` | 防慢速攻击，只限制请求头，不影响上传 |
+| `ReadTimeout` | **`0`（不限）** | 设成 30s，2GB 上传必被切断，报 `i/o timeout` |
+| `WriteTimeout` | **`0`（不限）** | 设了就是「下载到一半连接中断」 |
+| `IdleTimeout` | `120s` | keep-alive 空闲回收 |
+
+```go
+srv := &http.Server{
+    Addr:              cfg.ListenAddr,
+    Handler:           mux,
+    ReadHeaderTimeout: 10 * time.Second,
+    ReadTimeout:       0,   // 不要设，上传时长由 MaxBytesReader 兜底
+    WriteTimeout:      0,   // 不要设，大文件下载不能被写超时打断
+    IdleTimeout:       120 * time.Second,
+}
+```
+
+`ReadTimeout` / `WriteTimeout` 为 0 不等于没有保护：上传侧靠 `http.MaxBytesReader` 限制体积，下载侧靠客户端断开时 `ServeContent` 自然退出。
+
+#### 4.0.2 启动自检（四步，顺序不能乱）
+
+```
+1. 打开 /data，不存在则创建
+2. 装载 releases.json —— 三态判断（见下）
+3. 清理残留 *.tmp
+4. 磁盘/记录对账
+```
+
+**第二步：三态判断**。这是最容易写错的一处——把「文件不存在」当成「文件损坏」，会导致全新部署时服务直接起不来。
+
+| 情况 | 判断 | 处理 |
+|---|---|---|
+| 文件不存在 | `errors.Is(err, fs.ErrNotExist)` | 初始化空结构，正常启动 |
+| 存在但 JSON 语法错误 | 解析报错 | **拒绝启动**，打印文件路径 + 出错行号 + 备份建议 |
+| 存在且合法，但缺字段 | 解析成功、零值字段 | 补默认值，记 WARN 日志 |
+
+**第三条：清理残留 tmp**。上传中断或进程被 kill 会留下临时文件，而且管理页的「占用总量」只统计 JSON 里的记录，看不见这些垃圾——磁盘就这么慢性泄漏。
+
+启动时遍历 `data/releases/**/*.tmp` 全部删除，日志输出删除个数和总字节数。不要只在启动时清理，也可以做成每天一次的后台任务。
+
+**第四条：对账**。文件系统与 JSON 是两套状态，中间任何一步崩溃都会产生不一致：
+
+| 不一致类型 | 现象 | 处理 |
+|---|---|---|
+| 孤儿文件 | 磁盘有 `1.3.0/windows-x64/package.bin`，JSON 无对应记录 | 移到 `data/orphan/` 待人工确认，**不直接删**（可能是唯一一份） |
+| 坏记录 | JSON 有记录，磁盘文件不见了 | 启动时把该记录标 `status='broken'`，页面红标提示，**不自动删记录** |
+
+对账只做「标记 + 移走」，不做「自动修复」。自动修复在版本记录这种不可再生数据上风险太高。
+
+#### 4.0.3 健康检查
+
+`GET /healthz` 不能只返回 `200 OK` —— 那样磁盘满了、`/data` 不可写时，进程活着、所有上传全失败，而 Docker 依然认为容器健康，不会告警。
+
+探针要真的写一次盘：
+
+```go
+func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
+    if err := h.storage.Probe(); err != nil {   // 写 .health 文件再删
+        http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
+        return
+    }
+    w.WriteHeader(http.StatusOK)
+}
+```
+
+`Probe()` 的操作：在 `data/` 下写一个几字节的 `.health.tmp`，`fsync` 后删除。失败即返回 503，Docker 的 `HEALTHCHECK` 会把容器标成 unhealthy。
+
+注意探针不要写进 `releases/` 目录，否则会被当成孤儿文件。
+
 ### 4.1 整体结构
 
 ```mermaid
@@ -180,15 +259,22 @@ online_exe/
 ├── internal/
 │   ├── config/config.go       # 环境变量 / flag
 │   ├── catalog/               # JSON 元数据 + 内存索引 + 排序
-│   │   ├── catalog.go
-│   │   └── persist.go
+│   │   ├── types.go           # 磁盘结构体，只用于持久化
+│   │   ├── catalog.go         # 内存索引、查询、排序、inflight 占位
+│   │   ├── persist.go         # 原子写、三态加载、tmp 清理、对账
+│   │   └── stats.go           # downloads 计数（Swap + 批量落盘）
 │   ├── httpapi/
 │   │   ├── router.go
+│   │   ├── dto.go             # HTTP 响应结构，与磁盘结构分离
+│   │   ├── errors.go          # 统一错误响应
+│   │   ├── middleware.go      # CIDR 白名单、日志、recover
 │   │   ├── pages.go           # html/template 渲染
 │   │   ├── upload.go
 │   │   ├── download.go
 │   │   └── releases.go
-│   ├── storage/local.go
+│   ├── storage/
+│   │   ├── storage.go         # 接口 + Probe()
+│   │   └── local.go
 │   └── semver/semver.go
 ├── web/                       # embed.FS 打包
 │   ├── templates/
@@ -199,9 +285,11 @@ online_exe/
 │       ├── download.js
 │       └── admin.js
 ├── data/                      # 运行时，.gitignore（容器内为 /data）
-│   ├── releases.json
-│   ├── stats.json
-│   └── releases/
+│   ├── releases.json          # 版本元数据
+│   ├── releases.json.bak      # 上一版备份
+│   ├── stats.json             # 下载计数
+│   ├── releases/              # 版本包
+│   └── orphan/                # 对账移入的孤儿文件，待人工确认
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .dockerignore
@@ -209,6 +297,10 @@ online_exe/
 ```
 
 `.dockerignore` 必须包含 `data/`、`.git/`、`docs/`、`*.md`，否则本地跑过的数据会被打进构建上下文，镜像体积白涨。`data/` 尤其不能进镜像——那会让「镜像内数据」和「挂载卷数据」两套并存，排查问题时极其混乱。
+
+**为什么磁盘结构体和 HTTP DTO 要分开**：`catalog/types.go` 里的 `Release` 是磁盘格式，`httpapi/dto.go` 里的 `ReleaseResp` 是响应格式。混用一个结构体的后果是——API 想加一个 `download_url` 字段，结果写进了 `releases.json`；想把 `uploaded_ip` 从响应里去掉，结果磁盘上的历史记录也跟着少了字段。
+
+分开的代价只是一个 20 行的转换函数，收益是「改接口不会动到持久化格式」。这在两人协作里尤其重要：B 改响应结构时，A 的存储层不会被牵连。
 
 ### 4.3 数据模型（JSON）
 
@@ -239,8 +331,7 @@ online_exe/
       "force_update": false,
       "status": "active",
       "uploaded_at": "2026-11-05T02:10:00Z",
-      "uploaded_ip": "10.20.3.51",
-      "downloads": 0
+      "uploaded_ip": "10.20.3.51"
     }
   ]
 }
@@ -250,19 +341,33 @@ online_exe/
 
 | 字段 | 作用 |
 |---|---|
-| `id` | 时间戳 + 随机后缀，排序稳定，不用自增 |
+| `id` | `20261105T021000-1f3a9c7e`：UTC 时间戳 + 8 位随机（避免同秒并发冲突），比自增更适合无序上传 |
 | `major/minor/patch` | 拆成整数存，`1.10.0` 与 `1.9.0` 才能正确比大小 |
 | `is_prerelease` | 正式版永远排在同版本预发布之前 |
 | `object_key` | 磁盘相对路径，程序生成，绝不用用户文件名 |
+| `uploaded_at` | **一律存 UTC**（`Z` 结尾），页面渲染时按 `TZ` 转本地，不要在存储层写本地时间 |
 | `uploaded_ip` | 内网无账号，靠这条留痕「谁传的」 |
-| `status` | `active` / `yanked`，撤回不删文件 |
-| `downloads` | 单独存 `stats.json`，避免每次下载都重写整个元数据文件 |
+| `status` | `active` / `yanked` / `broken`（对账发现的坏记录） |
+
+**`downloads` 不在这里**。计数单独存 `data/stats.json`，页面渲染时按 id 合并：
+
+```json
+{
+  "1f3a9c7e": 42,
+  "8b2d41af": 7
+}
+```
+
+只有一个真相源，避免「releases.json 里的值和 stats.json 里的值对不上」这类必出 bug 的设计。启动时以 `stats.json` 为准，缺失的 id 记 0。
+
+**schema 版本**：`"schema": 1` 是给未来迁移用的。加载时如果读到大于当前程序支持的版本号，**拒绝启动并提示升级程序**，不要尝试猜测解析——半懂不懂地解析旧格式，比直接罢工危险得多。
 
 **落盘策略**：
 
 - 元数据变更：`releases.json.tmp` → `fsync` → `rename` → fsync 目录
-- 下载计数：内存计数，每 30 秒或累计 100 次批量写 `stats.json`
-- 启动时解析失败：**直接拒绝启动并打印错误**，绝不拿空数据覆盖原文件（这是最容易被写错的一处，一个 bug 就能清空所有版本记录）
+- 下载计数：内存 `atomic.Int64` 累加，每 30 秒或累计 100 次批量写 `stats.json`（详见 4.6）
+- 启动时的四步自检见 4.0.2（三态判断 / tmp 清理 / 对账）
+- 写盘前把旧文件复制一份 `releases.json.bak`，只保留一份，用于误操作后的最后一道兜底
 
 ### 4.4 版本管理规则
 
@@ -270,13 +375,35 @@ online_exe/
 |---|---|
 | 版本格式 | 严格 semver：`MAJOR.MINOR.PATCH[-prerelease]`，允许前缀 `v` |
 | 唯一键 | `(os, arch, channel, version)` 组合唯一 |
-| 不可变 | 同版本号重复上传 → `409`，必须显式 `overwrite=1` |
+| **严格不可变** | 同版本号重复上传 → 一律 `409`，**不提供覆盖**。传错了就发 `1.3.1` |
 | 排序 | `major → minor → patch` 降序，正式版优先于预发布 |
+| 预发布回落 | 某平台只有预发布版本时，`latest` 回落到最高的预发布并标 Beta，不返回空 |
 | 撤回 | `status='yanked'`，文件保留，列表灰显，直链仍可下 |
 | 物理删除 | 只提供 `DELETE /api/releases/{id}`，前端二次确认（输入版本号） |
 | 渠道 | `stable` / `beta` 两个筛选维度，避免内测版被当成正式版 |
 
 各平台独立取最新：Windows 停 1.2.0、macOS 已到 1.4.0 是正常状态，不做跨平台版本对齐。
+
+#### 为什么砍掉 overwrite
+
+上一版允许 `overwrite=1` 覆盖同版本，这跟下载侧的 `Cache-Control: immutable` 是**直接冲突**的：浏览器缓存了 `/dl/1.3.0/windows-x64` 之后一年内不会再发请求，覆盖了包也拿不到新的，用户只会说「我下了但程序没变」，极难排查。
+
+两条路：给 URL 加内容指纹，或者禁止覆盖。选了后者，因为**版本号不可变本来就是发版系统的底线**——同一个 `1.3.0` 在不同时间对应不同内容，会让「用户报的问题到底对应哪个二进制」永远说不清。
+
+砍掉之后连带简化了三件事：查重逻辑不需要分支、缓存策略天然成立、上传流程里那个「先写新再删旧」的伪命题直接消失。
+
+#### latest 的完整选取逻辑
+
+```text
+1. 过滤：os / arch / channel 匹配，status == "active"
+2. 正式版优先：在 isPrerelease == false 的集合里取最高
+3. 回落：若为空，取 isPrerelease == true 的最高版本，响应带 "prerelease": true
+4. 排序键：major → minor → patch 降序，同版本按 createdAt 降序
+```
+
+项目用 JSON 存储、没有 SQL，上面的规则实现时就是内存切片上的多字段比较。
+
+第 3 步的回落是必须的：某平台刚开测、只传了 `1.3.0-beta.1`，如果严格过滤正式版，页面会显示「暂无版本」但磁盘上明明有包。
 
 ### 4.5 上传
 
@@ -285,32 +412,60 @@ online_exe/
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `file` | ✅ | 二进制产物 |
-| `version` | ✅ | semver |
+| `version` | ✅ | semver；同版本重复上传一律 409 |
 | `os` | ✅ | windows / macos / linux |
 | `arch` | ✅ | x64 / arm64 / ia32 |
 | `channel` | | 默认 stable |
 | `changelog` | | 更新说明，多行文本 |
 | `force_update` | | `0` / `1` |
-| `overwrite` | | `1` 时允许覆盖同版本 |
 
-处理流程：
+**没有 `overwrite` 字段**。覆盖已被取消，见 4.4。
 
-1. 校验 `os`/`arch` 是否在 6 组白名单内
-2. 解析 semver 并拆数字
-3. 查重：同 `(os,arch,channel,version)` 存在且未带 `overwrite` → 409
-4. 流式落盘：`io.TeeReader(file, sha256Hasher)` 写临时文件，边写边算哈希
-5. 超限检查：默认单包 2GB，超出立刻中断并删除临时文件
-6. 磁盘空间检查：剩余空间 < 2 倍包大小 → 拒绝，提示「磁盘空间不足」
-7. 原子提交：临时文件 → rename 到 `data/releases/{version}/{os}-{arch}/package.bin`
-8. 更新内存索引 + 落盘 JSON
-9. 返回 201 + 记录 JSON
+#### 并发控制：不能「全程加锁」
+
+一次发版要连传 6 个平台的包，如果整个上传期间都持锁，6 个 2GB 包会被串行化，总耗时翻 6 倍。
+
+正确做法是**只在「查重 + 占位」和「提交」两个瞬间持锁**，中间的大文件传输不持锁：
+
+```
+① 持锁（微秒级）
+   ├─ releases 里已有同 key？        → 409，退出
+   ├─ inflight 里已有同 key？        → 409「该版本正在上传」
+   └─ inflight[key] = true，释放锁
+
+② 不持锁：流式接收并写盘（几秒到几分钟）
+
+③ 持锁：写内存索引 + 落盘 JSON + 删除 inflight 标记，释放锁
+```
+
+`inflight` 是进程内的 `map[string]bool`，key = `os|arch|channel|version`。这样 6 个不同平台可以并行，同一平台同一版本并发只有一个能进来。
+
+失败路径（超限、客户端断开、磁盘检查不通过）必须持锁删除 `inflight` 标记并清理临时文件，否则这个版本会被永久卡住，只能重启服务。
+
+再加一层兜底：`inflight` 记录 entry 里带开始时间戳，后台每 5 分钟扫一次，清掉超过 30 分钟仍未提交的条目。客户端拔网线跑路的场景下，超时释放比「等人肉重启」可靠得多。
+
+#### 处理流程
+
+1. 校验 `os`/`arch` 是否在 6 组白名单内，semver 是否合法
+2. 持锁查重 + 占位（见上）
+3. **磁盘空间预检**：用 `Content-Length` 估算，剩余空间 < 2 倍请求体 → 直接 507，释放占位。若客户端用 chunked 编码（无 `Content-Length`），跳过预检，靠写入过程中的写错误兜底
+4. 建目录 `data/releases/{version}/{os}-{arch}/`
+5. 流式落盘：`io.TeeReader(file, sha256Hasher)` 写唯一临时文件，边写边算哈希
+6. 写入超限（`MaxBytesReader` 触发）或客户端断开 → 中断、删临时文件、释放占位
+7. 原子提交：`rename(tmp, package.bin)`（同一文件系统内原子替换）
+8. 持锁更新内存索引 + 落盘 JSON + 删除 inflight 标记
+9. 返回 201 + 记录 JSON（含 sha256 与 size）
+
+**空间检查必须在第 3 步、写盘之前做**。放到写完之后再检查，等于先花 20 分钟传完 2GB 再告诉用户「磁盘不够」，带宽和时间全白费。
 
 **必须遵守的几条（都是坑）**：
 
+- **临时文件必须与目标文件在同一文件系统**。放在 `data/releases/{version}/{os}-{arch}/package.bin.{nanotime}-{rand}.tmp`，不能用 `/tmp`——跨文件系统 `rename` 会返回 `EXDEV`，整个原子提交的前提就没了。
+- **临时文件名必须唯一**：`{nanotime}-{rand}` 后缀。并发上传时固定名字会互相覆盖，最后写出的包内容不完整，但 sha256 记的是其中一次的，查都查不出来。
 - 磁盘文件名一律程序生成 `package.bin`，**用户原始文件名只进 JSON 用于展示**。中文名、`../`、`CON`/`NUL` 这类 Windows 保留字，只要拿去拼路径就会出事。
 - 先写 `.tmp` 再 rename，否则上传中断会留下半截文件被当成有效包。
 - `multipart.Reader` 流式读，内存占用恒定；`http.MaxBytesReader` 兜底防止无上限读取。
-- `overwrite` 时必须先写新文件成功，再删旧文件，不能反过来。
+- `http.MaxBytesReader` 必须包在 `r.Body` 上、且在解析 multipart **之前**，否则不生效。
 
 CI 用法：
 
@@ -333,8 +488,26 @@ curl -X POST "http://10.20.3.10:8080/api/releases" \
 | 断点续传 | `http.ServeContent`，原生支持 `Range` / `If-Range` |
 | 缓存 | `ETag` = sha256，`Cache-Control: public, max-age=31536000, immutable` |
 | 文件名 | `Content-Disposition: attachment; filename*=UTF-8''<urlencoded>`，中文名不乱码 |
-| 计数 | 内存原子自增，30s 批量 flush 到 `stats.json` |
+| 计数 | 内存 `atomic.Int64` 自增，30s 用 `Swap` 取出清零后批量累加到 `stats.json` |
 | 撤回版本 | `yanked` 仍可下载，保证老用户回滚不断链 |
+
+**`immutable` 成立的前提是版本号不可变**。因为已经砍掉 overwrite（见 4.4），同一个 URL 永远对应同一份内容，这个缓存头才敢设一年。这是砍掉覆盖换来的最大收益——省掉几乎全部重复下载流量。
+
+**计数必须用 Swap，不能用「读当前值再写」**：
+
+```go
+// 错误写法：flush 期间的增量会被下一轮重复计入，或者直接丢失
+n := counter.Load()
+writeStats(id, n)          // 这中间的新下载全丢了
+
+// 正确写法：取出并清零是一次原子操作
+n := counter.Swap(0)
+if n > 0 {
+    addStats(id, n)        // 累加到 stats.json 里已有的值
+}
+```
+
+进程重启会丢掉最多 30 秒的计数，这个精度对内网工具完全够用，不需要为此引入 WAL。
 
 **下载链接一律用相对路径**（`/dl/1.3.0/windows-x64`），不在页面里拼 `http://IP:PORT`。内网服务器可能有多块网卡、IP 可能调整、也可能被人用主机名访问，硬编码 host 一定会出奇怪的 404。
 
@@ -373,11 +546,12 @@ HTML + CSS + 原生 JavaScript（ES6），**无框架、无 TypeScript、无构�
 
 只读，没有任何写操作。
 
-- 顶部：应用名 + 最新版本号 + 更新时间
-- 平台 Tab：`Windows` / `macOS` / `Linux`，默认按访问者 UA 高亮
+- 顶部：应用名 + **各平台当前版本摘要**（如「Windows 1.2.0 / macOS 1.4.0 / Linux 1.2.0」），不要只显示一个全局版本号——6 个平台各自独立发版，实际版本经常不一致，显示单个数字会误导用户
+- 平台 Tab：`Windows` / `macOS` / `Linux`，默认按访问者 UA 高亮，**Tab 标题右侧直接带该平台最新版本号**
 - 每个 Tab 内按架构排列下载卡片：版本、文件大小、更新时间、下载按钮
 - 下方版本历史表格：版本、平台、大小、时间、更新说明、下载
 - `Beta` 渠道和 `yanked` 版本默认折叠，灰标
+- 只有预发布版本的平台，卡片标 `Beta` 并提示「暂无正式版」
 - macOS 卡片下附 Gatekeeper 放行步骤（见第 5 节）
 
 #### 管理页 `/admin`
@@ -394,7 +568,9 @@ HTML + CSS + 原生 JavaScript（ES6），**无框架、无 TypeScript、无构�
 - 表单字段：版本号、平台、架构、渠道、更新说明、强制更新
 - 平台 / 架构用下拉，只允许 6 组合法组合
 - **表单记忆**：版本号和渠道存 `sessionStorage`。一次发版要连传 6 个平台的包，不记忆就得重复填 6 遍，这是最容易让人放弃用网页、改去写 curl 的地方
+- **版本冲突提示**：返回 `409` 时不要只弹「上传失败」，要明确写出「1.3.0 / windows / x64 已存在，请改用 1.3.1」，并自动把表单里的版本号 +1 到 patch 位
 - 上传成功后：列表自动刷新，新增那一行高亮 3 秒，并展示 sha256 前 8 位供人工核对
+- 上传失败（超限 / 磁盘不足 / 连接中断）时，临时文件必须已清理，页面提示可重试
 
 **③ 版本列表区**
 
@@ -409,13 +585,17 @@ HTML + CSS + 原生 JavaScript（ES6），**无框架、无 TypeScript、无构�
 ### 4.8 环境变量 / 启动参数
 
 ```bash
-LISTEN_ADDR=:8080            # 监听地址
-DATA_DIR=/data               # 数据目录（容器内固定 /data，由宿主机挂载）
-MAX_UPLOAD_MB=2048           # 单包上限
-KEEP_PER_PLATFORM=10         # 清理建议保留数（只用于提示，不自动删）
-APP_NAME=核心力量            # 首次启动写入 releases.json
-TZ=Asia/Shanghai             # 容器内时区，不设则日志与页面时间都是 UTC
+LISTEN_ADDR=:8080              # 监听地址
+DATA_DIR=/data                 # 数据目录（容器内固定 /data，由宿主机挂载）
+MAX_UPLOAD_MB=2048             # 单包上限
+KEEP_PER_PLATFORM=10           # 清理建议保留数（只用于提示，不自动删）
+APP_NAME=核心力量              # 仅在首次初始化 releases.json 时写入
+TZ=Asia/Shanghai               # 容器内时区；日志时间与页面渲染时间都按此转换
+ADMIN_ALLOW_CIDR=              # 空=不限制；填 10.20.0.0/16 则只允许该网段访问 /admin 与写接口
+STATS_FLUSH_SEC=30             # 下载计数落盘间隔
 ```
+
+`ADMIN_ALLOW_CIDR` 是「不加登录体系」前提下的最低成本防护：内网不等于可信网络，办公网和访客 WiFi 常常同网段，任何人打开 `http://IP:8080/admin` 都能删版本。填一个网段即可，下载页不受影响。留空则完全不限制。
 
 ### 4.9 容量上限与耗时参考
 
@@ -473,10 +653,14 @@ TZ=Asia/Shanghai             # 容器内时区，不设则日志与页面时间�
 | 风险 | 处置 |
 |---|---|
 | 误删版本 | 删除必须输入版本号；默认只提供「撤回」，物理删除是二级操作 |
-| 误覆盖版本 | 同版本默认 409，`overwrite=1` 显式覆盖 |
-| 磁盘写满 | 上传前检查剩余空间；页面顶部常驻显示；启动日志打印占用 |
+| 误覆盖版本 | 已从机制上消除：版本号严格不可变，同版本一律 409 |
+| 磁盘写满 | 上传前检查剩余空间；管理页顶部常驻显示；`/healthz` 写盘探针失败即标 unhealthy |
 | 路径穿越 | `os`/`arch` 白名单 + 版本号正则 + 磁盘名程序生成，三重挡 |
-| JSON 损坏 | 启动解析失败即拒绝启动，不覆盖原文件；每次写盘前把旧文件留一份 `.bak` |
+| JSON 损坏 | 启动三态判断（不存在 / 语法错误 / 缺字段）；语法错误拒绝启动，绝不拿空数据覆盖 |
+| 文件与记录不一致 | 启动对账：孤儿文件移入 `data/orphan/`，坏记录标 `broken`，只标记不自动修复 |
+| 崩溃残留临时文件 | 启动清理 `**/*.tmp`，日志输出个数与字节数 |
+| 并发上传同一版本 | 进程内 `inflight` 占位，第二个请求直接 409「正在上传」 |
+| `/admin` 被任意人访问 | `ADMIN_ALLOW_CIDR` 限定来源网段（不加登录体系下的最低成本防护） |
 | 服务挂了 | Docker `restart: unless-stopped` + `HEALTHCHECK` 自动拉起 |
 | 容器重建丢数据 | 数据全在宿主机挂载目录，容器无状态；`docker rm` 不影响版本记录 |
 | 内网谁传的说不清 | `uploaded_ip` + `uploaded_at` 记录在案，页面上可见 |
@@ -527,10 +711,12 @@ docker compose logs -f
 
 ```dockerfile
 # ---------- 构建阶段 ----------
-FROM golang:1.22-alpine AS build
+# 注意：golang 镜像版本必须与 go.mod 里声明的 go 版本一致，
+# go.mod 写 1.26 而这里用 1.22 会直接构建失败（go.mod requires go >= 1.26）
+FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod ./
-RUN go mod download
+# 当前零第三方依赖，不需要为 go.mod 单独做缓存分层；
+# 将来引入依赖时改成：COPY go.mod go.sum ./ && go mod download，再 COPY . .
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath -ldflags="-s -w" \
@@ -579,7 +765,7 @@ ENTRYPOINT ["/app/server"]
 ```yaml
 services:
   online-exe:
-    image: online-exe:1.0.0
+    image: online-exe:${IMAGE_TAG:-1.0.0}
     container_name: online-exe
     restart: unless-stopped
     ports:
@@ -588,6 +774,7 @@ services:
       TZ: Asia/Shanghai
       MAX_UPLOAD_MB: "2048"
       KEEP_PER_PLATFORM: "10"
+      ADMIN_ALLOW_CIDR: "10.20.0.0/16"
     volumes:
       - /srv/online_exe/data:/data
     logging:
@@ -601,6 +788,10 @@ services:
       timeout: 3s
       retries: 3
 ```
+
+`IMAGE_TAG` 走变量而不是写死版本号：升级时改 `.env` 里的 `IMAGE_TAG=1.0.1`，`docker compose up -d` 就完成替换，不用动 compose 文件本身。
+
+`ADMIN_ALLOW_CIDR` 记得改成你内网的实际网段，`10.20.0.0/16` 只是示例——填错了会导致管理页直接 403。
 
 `logging` 那两行别省。容器日志默认无限增长，一个被反复扫描的下载接口能在几个月内把磁盘写满——这是容器部署最常见的「莫名其妙磁盘满了」的来源。
 
@@ -645,7 +836,7 @@ Docker 只是交付方式，不是架构依赖——这一点在设计时就要�
 
 ### 7.1 分工原则
 
-1. **按文件切，不按前后端层切**。前端一共 650 行模板样式，一人包前端会闲死，一人包后端会累死。
+1. **按文件切，不按前后端层切**。前端一共 540 行模板样式，一人包前端会闲死，一人包后端会累死。
 2. **公共契约第一天冻结**。路由表、数据结构、接口签名定死之后，谁都不许单方面改。
 3. **每个人的文件集合不重叠**，git 冲突概率压到接近 0。
 
@@ -655,12 +846,15 @@ Docker 只是交付方式，不是架构依赖——这一点在设计时就要�
 
 | 冻结项 | 落在哪个文件 | 要求 |
 |---|---|---|
-| 数据结构 | `internal/catalog/types.go` | `Release` 结构体全部字段 + JSON tag + 空值约定 |
-| 存储接口 | `internal/catalog/catalog.go` | `Catalog` / `Storage` 的方法签名先定，实现留空 |
+| 磁盘结构 | `internal/catalog/types.go` | `Release` 全部字段 + JSON tag + 空值约定 |
+| 响应 DTO | `internal/httpapi/dto.go` | `ReleaseResp`，与磁盘结构解耦，**不许复用同一个结构体** |
+| 存储接口 | `internal/catalog/catalog.go` | `Catalog` 方法签名 + `inflight` 占位相关方法 |
+| 文件存储接口 | `internal/storage/storage.go` | `Storage` 接口 + `Probe()` 签名 |
 | 路由表 | `internal/httpapi/router.go` | 所有路径 + handler 名，handler 先返回 `501` |
 | 错误格式 | `internal/httpapi/errors.go` | 统一 `{"error":"..."}` + 状态码约定 |
 | 模板文件名 | `web/templates/` | 两个页面文件名先占位（`download.html` / `admin.html`） |
-| 配置项 | `internal/config/config.go` | 环境变量结构体定死 |
+| 模板数据结构 | `internal/httpapi/pages.go` | 页面渲染用的 view model 字段先定死 |
+| 配置项 | `internal/config/config.go` | 环境变量结构体定死（含 `ADMIN_ALLOW_CIDR`） |
 
 冻结后的纪律：
 
@@ -673,23 +867,26 @@ Docker 只是交付方式，不是架构依赖——这一点在设计时就要�
 | 模块 | 文件 | 负责人 | 预估 |
 |---|---|---|---|
 | semver 解析与比较 | `internal/semver/` | **A** | 120 行 |
-| JSON 元数据 + 内存索引 + 排序 | `internal/catalog/` | **A** | 300 行 |
-| 本地存储 | `internal/storage/` | **A** | 100 行 |
-| 上传接口 + 流式落盘 + sha256 | `internal/httpapi/upload.go` | **A** | 250 行 |
+| 磁盘结构与内存索引 | `internal/catalog/types.go` `catalog.go` | **A** | 280 行 |
+| 原子写 / 三态加载 / tmp 清理 / 对账 | `internal/catalog/persist.go` | **A** | 180 行 |
+| 下载计数 | `internal/catalog/stats.go` | **A** | 80 行 |
+| 本地存储 + `Probe()` | `internal/storage/` | **A** | 120 行 |
+| 上传接口 + 流式落盘 + sha256 + inflight | `internal/httpapi/upload.go` | **A** | 280 行 |
 | 磁盘空间检查 | `internal/httpapi/disk.go` | **A** | 60 行 |
-| 路由 / 配置 / main | `router.go` `config.go` `main.go` | **A 维护**（阶段 0 共同产出） | 150 行 |
-| 下载接口（Range / ETag / 计数） | `internal/httpapi/download.go` | **B** | 150 行 |
-| 下载页 + 管理页渲染 | `internal/httpapi/pages.go` | **B** | 220 行 |
+| 路由 / 配置 / main / 中间件 | `router.go` `config.go` `main.go` `middleware.go` | **A 维护**（阶段 0 共同产出） | 200 行 |
+| 下载接口（Range / ETag / Swap 计数） | `internal/httpapi/download.go` | **B** | 160 行 |
+| 响应 DTO + 错误格式 | `internal/httpapi/dto.go` `errors.go` | **B** | 70 行 |
+| 页面渲染 | `internal/httpapi/pages.go` | **B** | 220 行 |
 | 两个页面的模板 + CSS | `web/templates/` `web/static/` | **B** | 420 行 |
 | 前端交互 JS | `web/static/download.js` `web/static/admin.js` | **B** | 120 行 |
 | Dockerfile + compose + 部署验证 | `Dockerfile` `docker-compose.yml` | **B** | 80 行 |
 
-合计：A 约 980 行（含 150 行公共骨架），B 约 1080 行（其中 650 行是 HTML/CSS，写起来比 Go 快）。
+合计：A 约 1320 行（含 200 行公共骨架与被审查修订追加的健壮性代码），B 约 1070 行（其中 540 行是 HTML/CSS，写起来比 Go 快）。
 
 ### 7.4 为什么这么切
 
 - **A 管「数据怎么进来」，B 管「数据怎么出去」**，中间只靠冻结的 `Catalog` 接口对接，两边可以并行。
-- Go 代码的心智负担高于模板，A 的 980 行 Go 和 B 的 1080 行（含 650 行静态页面）体感基本持平。
+- Go 代码的心智负担高于模板，A 的 1320 行 Go 和 B 的 1070 行（含 540 行静态页面）体感基本持平。
 - B 在 A 的存储层没写完之前，可以先用假数据渲染页面，**不阻塞**。
 - 唯一的重叠点是 `router.go`，用「只由 A 改」的规则消灭。
 
@@ -719,18 +916,26 @@ Docker 只是交付方式，不是架构依赖——这一点在设计时就要�
 
 ### 7.7 验收清单（两人共同跑一遍）
 
-1. 6 个平台各传一个包，下载页按平台正确分组
-2. 管理页上传成功后列表立即出现新行，大小与 sha256 前 8 位正确
-3. 下载页上找不到任何上传/删除入口（只读约束）
-4. 同版本重复上传 → `409`；带 `overwrite=1` → 覆盖成功且旧文件已删
-5. 2GB 包上传不 OOM（`docker stats` 观察内存是否恒定）
-6. 下载中断后续传成功（浏览器暂停/恢复，或 `curl -C -`）
-7. 撤回版本后下载页列表灰显，直链仍可下载
-8. `docker rm -f` 后重新 `up -d`，版本记录与文件都在
-9. 宿主机重启后容器自动拉起
-10. 页面时间与宿主机时间一致（时区没歪）
-11. 传一个中文文件名的包，下载时文件名不乱码
-12. 传一个 `.exe` 后缀但内容为随机字节的文件，sha256 与页面显示一致
+1. **首次启动**：`/data` 为空目录，服务能正常起来并生成空的 `releases.json`（不是拒绝启动）
+2. 6 个平台各传一个包，下载页按平台正确分组，Tab 上的版本号正确
+3. 管理页上传成功后列表立即出现新行，大小与 sha256 前 8 位正确
+4. 下载页上找不到任何上传/删除入口（只读约束）
+5. **同版本重复上传一律 `409`**，且磁盘上不产生多余额外文件
+6. **并发上传同一版本**：两个 curl 同时打同一个 `(os,arch,version)`，只有一个 201，另一个 409「正在上传」
+7. **并发上传不同平台**：6 个 curl 同时传 6 个平台，全部成功，总耗时接近单个包的耗时（验证没有被串行化）
+8. 2GB 包上传不 OOM（`docker stats` 观察内存是否恒定）
+9. **上传中途 `kill -9` 容器**，重启后 `**/*.tmp` 已被清理，`releases.json` 无残留记录
+10. **手动往 `data/releases/9.9.9/` 塞一个野文件**，重启后该目录被移入 `data/orphan/`，原记录不受影响
+11. **把挂载目录改成只读**（或塞满小盘），`/healthz` 返回 503，`docker ps` 显示 unhealthy
+12. 下载中断后续传成功（浏览器暂停/恢复，或 `curl -C -`）
+13. **同一 URL 二次下载**命中缓存（DevTools 显示 `from disk cache`），且服务端不再收到请求
+14. 撤回版本后下载页列表灰显，直链仍可下载
+15. `docker rm -f` 后重新 `up -d`，版本记录与文件都在
+16. 宿主机重启后容器自动拉起
+17. 页面时间与宿主机时间一致（时区没歪）
+18. 传一个中文文件名的包，下载时文件名不乱码
+19. 传一个 `.exe` 后缀但内容为随机字节的文件，sha256 与页面显示一致
+20. 只传预发布版本 `1.3.0-beta.1` 的平台，下载页显示该版本并标 Beta，不是「暂无版本」
 
 ### 7.8 备选分工（两人能力差异较大时）
 
@@ -751,12 +956,12 @@ Docker 只是交付方式，不是架构依赖——这一点在设计时就要�
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| M1 | 骨架 + JSON 存储 + semver + 上传接口 | curl 传 100MB 包成功，文件落盘，`releases.json` 正确 |
-| M2 | 下载接口 + 下载页 | 浏览器加载页面，能下、能断点续传、sha256 与页面对得上 |
+| M1 | 骨架 + 启动自检 + JSON 存储 + semver + 上传接口 | 空 `/data` 首次启动成功；curl 传 100MB 包落盘正确；同版本重传返回 409 |
+| M2 | 下载接口 + 下载页 | 浏览器能下、能断点续传、二次下载命中缓存、sha256 与页面对得上 |
 | M3 | 管理页（上传 + 版本列表） | 一页内完成上传、核对、撤回、删除，无需跳转其他页面 |
-| M4 | 磁盘检查 + Dockerfile + 离线导入 | `docker save/load` 后起容器，数据挂卷，`docker rm` 重建后版本记录还在 |
+| M4 | 磁盘检查 + 对账 + Dockerfile + 离线导入 | `docker save/load` 后起容器；数据挂卷；`docker rm` 重建后记录还在；只读挂载时 healthz 返 503 |
 
-代码量估计 1400–1800 行 Go + 650 行模板样式。单人 2 天，双人并行 2.5–3 天（含契约冻结与联调）。
+代码量估计 2200–2500 行（Go 约 1800 + 模板样式 540）。单人约 3 天，双人并行 2.5–3 天（含契约冻结与联调）。
 
 ---
 
@@ -768,3 +973,4 @@ Docker 只是交付方式，不是架构依赖——这一点在设计时就要�
 4. **内网 Docker / Compose 版本？** compose 文件用的是 v2 语法（`services:` 顶层、无 `version:`），需要 Docker Compose v2。老版本（`docker-compose` 1.x）要改写法，提前确认省一轮返工。
 5. **宿主机有没有独立数据盘可挂 `/srv/online_exe/data`？** 没有的话至少要确认根分区剩余 50GB 以上。
 6. **两人各自更擅长哪一侧？** 决定 7.3 的分工是按原样执行，还是切到 7.8 的备选方案。
+7. **管理页的来源网段是什么？** 填 `ADMIN_ALLOW_CIDR`，填错管理页直接 403。不确定就先留空，上线后再收紧。
