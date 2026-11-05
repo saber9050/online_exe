@@ -1,28 +1,8 @@
 # 内网客户端发版平台 · 方案设计
 
-> 版本：v3.4（Node.js 全栈 · 分工改为按页面竖切）　日期：2026-11-05　模块名：`online_exe`
+> 版本：v3.4　日期：2026-11-05　模块名：`online_exe`
 >
-> 状态：v3.3 的技术设计保持不变。v3.4 只动**分工（第 7 节）**及支撑它的目录结构、样式拆分，改动处用 **v3.4 修正** 就地标注。
-
-## 变更记录
-
-| 版本 | 日期 | 变更 |
-|---|---|---|
-| v1.0 | 2026-11-05 | 初版，按公网服务假设设计（HTTPS / 上传密钥 / Nginx / 对象存储预留） |
-| v2.0 | 2026-11-05 | 确认仅部署内网：砍掉 HTTPS、上传密钥、限流、Nginx、OSS；元数据改为 JSON 文件 |
-| v2.1 | 2026-11-05 | 确认 Docker 单容器部署，部署章节改为 Dockerfile + compose + 离线 save/load |
-| v2.2 | 2026-11-05 | 两人开发，新增分工章节与前端技术栈 |
-| v2.3 | 2026-11-05 | 页面收敛为两页：下载页 `/` 只读，管理页 `/admin` 合并上传与版本管理 |
-| v2.4 | 2026-11-05 | 新增容量上限与耗时参考 |
-| v2.5 | 2026-11-05 | 技术审查修订：运行基线、砍掉 overwrite、并发占位、启动对账、下载计数单源 |
-| v2.6 | 2026-11-05 | Windows 拆分为 Win7 / Win10 两个独立平台，平台组合 6 → 8 组 |
-| v3.0 | 2026-11-05 | **技术栈由 Go 改为 Node.js 全栈**：Express 5 + busboy + EJS；重写运行基线（`requestTimeout` 默认 300s 是大坑）、启动自检、部署与分工。设计决策与平台模型不变 |
-| v3.1 | 2026-11-05 | **Node 版审查修订**：元数据改走 query string（解决 multipart 字段顺序不确定）；busboy 提交改为 `Promise.all(tasks)`（close 不等于写完）；修正 `headersTimeout`/`keepAliveTimeout` 方向；下载页 Tab 改锚点区块（JS 挂了也能用）；路由改 `:combo`；`aborted` 改 `close`；补 orphan 递归、坏记录 410、静态资源缓存、IE11 兜底 |
-| v3.2 | 2026-11-05 | **二轮审查**：删掉 `channel` 与 `force_update`，唯一键收敛为 `(platform,arch,version)`；空间预检系数 2 → 1.1；JSON 写串行队列 + 提交顺序修正；busboy 补 `defParamCharset`、`filesLimit`/`error` 事件、状态机防重入；`Content-Disposition` 补 ASCII 回退（IE11）；包文件补 fsync；新增优雅退出；修 IPv6-mapped 地址、EJS 布局、broken 重传、orphan 管理入口 |
-| v3.3 | 2026-11-05 | **三轮审查**：修 `tasks` 悬空 promise 导致进程退出（最严重）；删除改为墓碑，堵死「删后重传」击穿不可变；`status` 与文件缺失解耦（新增 `file_missing`）；v 前缀归一化；空间预检加并发额度；超时方向纠错（真实约束是 `headersTimeout <= requestTimeout`）；`commit()` 作用域 bug；broken 重传沿用原 id；部署改 `network_mode: host` 取真实源 IP；清理 4.7 残留的「渠道/强制更新」；补续传计数去重、combo 校验、CI 网段说明 |
-| v3.4 | 2026-11-05 | **分工改为按页面竖切**：第 7 节整体重写（分工原则 / 页面归属 / 页面↔接口接缝 / 工作量账 / 时序 / 验收认领 / 备选），里程碑挂人。为支撑切分动了目录：`routes/pages.js` 拆成 `pages/download.js` + `pages/admin.js`，`public/style.css` 拆成 `base.css` + `download.css` + `admin.css`，新增 `fixtures/`。技术设计不变，附录新增 E 节 |
-
----
+> Node.js 全栈 · Express 5 + busboy + EJS · Docker 单容器 · 内网零外部依赖。本文档只描述**当前设计**，不含历史版本差异。
 
 ## 1. 需求与边界
 
@@ -44,6 +24,7 @@
 | 平台范围 | **Windows 分 Win7 / Win10 两套独立产物**；macOS（x64 / arm64）、Linux（x64 / arm64），共 8 组 |
 | 语言 | **Node.js 全栈**（`Express 5` 后端 + `EJS` 模板 + 原生 ES5 前端） |
 | 上传方式 | HTTP 上传（multipart 流式） |
+| **单包大小** | **300–400MB**（8 组合齐套约 3.2GB/版本，容量预算见 4.9） |
 | 存储 | 本地磁盘（容器内挂载宿主目录） |
 | 部署方式 | **Docker 单容器**，离线 `save` / `load` 导入 |
 | 自动更新接口 | 不做 |
@@ -129,7 +110,7 @@
 |---|---|---|
 | 运行时 | **Node.js 24 LTS** | 团队统一，前后端同栈，一个语言维护两处 |
 | Web 框架 | **Express 5** | 生态最大、心智负担最低；`res.sendFile` 底层是 `send` 库，**原生支持 Range / If-Range / 条件请求** |
-| multipart | **busboy**（不用 multer） | 唯一真正的流式解析；multer 是「先落盘或先读内存」的封装，2GB 包会吃掉内存 |
+| multipart | **busboy**（不用 multer） | 唯一真正的流式解析；multer 是「先落盘或先读内存」的封装，几百 MB 的包会吃掉同等内存 |
 | 模板 | **EJS** | 语法接近 HTML，两人都能改，IE11 零压力 |
 | 模块规范 | **ESM**（`"type": "module"`） | Node 24 原生，不需要构建步骤 |
 | 类型 | **JSDoc 注释**，不上 TypeScript | 2200 行的项目配 tsc + 构建链，收益抵不过成本；编辑器照样有补全 |
@@ -157,7 +138,7 @@
 }
 ```
 
-**v3.3 补充**：`start` 脚本不是装饰。`npm ci --omit=dev` 之后 `node_modules/.bin` 里只有生产依赖，容器里靠 `CMD ["node", "src/server.js"]` 直接起还无所谓；但一旦有人想用 `npm start` 排查（比如 `docker run --rm -it online-exe npm start`），没有这个脚本会报 `Missing script: start`，白耽误十分钟。`dev` 脚本里的 `nodemon` 在 `devDependencies`，`--omit=dev` 时不会进镜像，所以容器里跑 `npm run dev` 必然失败——这是预期行为。
+**`start` 脚本不是装饰**。`npm ci --omit=dev` 之后 `node_modules/.bin` 里只有生产依赖，容器里靠 `CMD ["node", "src/server.js"]` 直接起还无所谓；但一旦有人想用 `npm start` 排查（比如 `docker run --rm -it online-exe npm start`），没有这个脚本会报 `Missing script: start`，白耽误十分钟。`dev` 脚本里的 `nodemon` 在 `devDependencies`，`--omit=dev` 时不会进镜像，所以容器里跑 `npm run dev` 必然失败——这是预期行为。
 
 依赖越少，内网构建出问题的概率越低，镜像层越干净。`nodemon` 这类只进 `devDependencies`，`npm ci --omit=dev` 时不会进镜像。
 
@@ -169,18 +150,16 @@
 
 如果以后规模变大要上 TS，`tsx` 或 Node 24 的原生类型剥离（`--experimental-strip-types`）都能平滑过渡。
 
-### 3.3 从 Go 换过来的代价（客观记录）
+### 3.3 这套选型的已知代价
 
-| 项 | Go 版 | Node 版 |
+| 项 | 现状 | 影响 |
 |---|---|---|
-| 镜像体积 | ~15MB | ~140MB |
-| 运行时内存 | 20–40MB | 50–80MB |
-| 大文件流式 | `io.Copy` 一行，背压自动 | `stream.pipeline` + 手动管背压，要小心 |
-| Range / ETag | `http.ServeContent` 一行 | `res.sendFile` 一行；`send` 会沿用已有 ETag，但**默认还会设 `Last-Modified`**，必须显式关掉 |
-| 部署产物 | 单二进制 | 镜像 + node_modules |
-| 并发模型 | 多 goroutine + 锁 | 单线程事件循环，`inflight` 检查天然原子 |
+| 镜像体积 | ~140MB | 离线 `save/load` 传输稍慢，可接受 |
+| 运行时内存 | 50–80MB | 单容器无压力 |
+| 大文件流式 | `stream.pipeline` + 手动管背压 | 上传逻辑必须照 4.5 写，不能图省事 `on('data')` |
+| 部署产物 | 镜像 + `node_modules` | 内网装不了依赖，必须走镜像 `save/load` |
 
-结论：这些代价在「团队统一语言」面前可以接受，但**第 4 节的运行基线必须严格照做**——Node 有几个默认值会在生产上直接咬人。
+这些是 Node 方案的固定成本，接受它换「前后端同一语言、一个人维护两处」。**补偿条款是第 4 节的运行基线必须严格照做**——Node 有几个默认值会在生产上直接咬人。
 
 ---
 
@@ -190,14 +169,14 @@
 
 这一节写「实现时必须遵守、写错就会在线上出事」的底层参数。
 
-#### 4.0.1 四个超时（Node 版最大的坑）
+#### 4.0.1 四个超时（最大的坑）
 
 Node 18+ 给 HTTP Server 加了几个默认超时，对普通 API 是保护，对**大文件上传就是绞索**：
 
 | 参数 | Node 默认值 | 必须设为 | 不改的后果 |
 |---|---|---|---|
-| `server.requestTimeout` | **300000（5 分钟）** | **`0`（禁用）** | 2GB 包在百兆网络要 3 分钟，稍慢就被 408 掐断，**而且报错是 `request timeout`，根本看不出是上传超时** |
-| `server.headersTimeout` | 60000 | 60000（**保持默认**） | 只限制请求头接收时长，与上传无关。**v3.3 修正**：不需要改成 66000 |
+| `server.requestTimeout` | **300000（5 分钟）** | **`0`（禁用）** | 400MB 包在百兆网络要 36 秒、2Mbps 限速链路要 27 分钟，慢链路必被 408 掐断，**而且报错是 `request timeout`，根本看不出是上传超时** |
+| `server.headersTimeout` | 60000 | 60000（**保持默认**） | 只限制请求头接收时长，与上传无关，**不要改成 66000** |
 | `server.keepAliveTimeout` | 5000 | 65000 | 默认 5 秒太短，客户端连接池会复用到服务端已经关掉的 socket，表现为偶发 `ECONNRESET` |
 | `server.timeout` | 0 | `0`（保持） | socket 空闲超时，设了会断长传输 |
 
@@ -216,7 +195,7 @@ server.timeout = 0
 server.listen(cfg.port, '0.0.0.0')
 ```
 
-**v3.3 修正：超时的方向讲反了。** v3.1/v3.2 写的「`headersTimeout` 必须大于 `keepAliveTimeout`，否则 Node 会告警并出现 `ECONNRESET`」，在 Node 源码里**不存在**这个检查。
+**超时方向只有一条强约束。** 常听到的说法「`headersTimeout` 必须大于 `keepAliveTimeout`，否则 Node 会告警并出现 `ECONNRESET`」，在 Node 源码里**不存在**这个检查。
 
 对照 `lib/_http_server.js` 的 `storeHTTPOptions()`，唯一的强约束是：
 
@@ -260,7 +239,7 @@ if (this.requestTimeout > 0 && this.headersTimeout > 0 && this.headersTimeout > 
 | 孤儿文件 | 磁盘有 `1.3.0/windows10-x64/package.bin`，JSON 无记录 | 移到 `data/orphan/` 待人工确认，**不直接删** |
 | 文件缺失 | JSON 有记录，磁盘文件不见了 | 置 `file_missing = true`，页面红标提示，**不自动删记录** |
 
-**v3.3 修正：文件缺失不再写进 `status`。** v3.2 用 `status='broken'`，会**覆盖掉原来的 `yanked`**——一个已经撤回的版本，文件一旦丢失就变回"损坏"，撤回状态凭空消失，列表里重新冒出一条待处理的红标记录。
+**文件缺失不写进 `status`。** 若用 `status='broken'` 表达，会**覆盖掉原来的 `yanked`**——一个已经撤回的版本，文件一旦丢失就变回“损坏”，撤回状态凭空消失，列表里重新冒出一条待处理的红标记录。
 
 现在把两个维度拆开：
 
@@ -303,7 +282,7 @@ export async function healthz(req, res) {
 
 #### 4.0.4 优雅退出
 
-`docker stop` 先发 SIGTERM，等 10 秒后 SIGKILL。没有退出处理的话，正在传的 2GB 会被硬砍（用户白传）、`stats.json` 里最多 30 秒的计数会丢。
+`docker stop` 先发 SIGTERM，等 10 秒后 SIGKILL。没有退出处理的话，正在传的 400MB 会被硬砍（用户白传）、`stats.json` 里最多 30 秒的计数会丢。
 
 ```js
 let shuttingDown = false
@@ -339,7 +318,7 @@ process.on('SIGINT',  () => void shutdown('SIGINT'))
 
 **别在 shutdown 里直接 `process.exit()`**，那样 `stats.flush()` 和队列里的 JSON 写都不会执行完。上面每一步都是 `await` 完再退。
 
-**v3.3 修正**：`persist.flush()` 不是凭空来的，实现就是 `return writeQueue`——4.3 那个串行队列的队尾 promise。`await` 它等于等所有排队中的 JSON 写完成。写成别的形式（比如再发起一次写）会和队列打架，等于把串行化拆了。
+`persist.flush()` 的实现就是 `return writeQueue`——4.3 那个串行队列的队尾 promise。`await` 它等于等所有排队中的 JSON 写完成。写成别的形式（比如再发起一次写）会和队列打架，等于把串行化拆了。
 
 ### 4.1 整体结构
 
@@ -426,9 +405,9 @@ online_exe/
 └── docs/
 ```
 
-**v3.4 修正：`pages.js` 拆成 `pages/download.js` 和 `pages/admin.js`。** 一个 `pages.js` 里塞两个页面的渲染函数，两人按页面分工时必然在同一文件里各改一段，冲突概率从 0 变成每天一次。拆开后 `routes/pages/` 下的文件与页面一一对应，谁改谁的。
+**`pages.js` 拆成 `pages/download.js` 和 `pages/admin.js`。** 一个 `pages.js` 里塞两个页面的渲染函数，两人按页面分工时必然在同一文件里各改一段，冲突概率从 0 变成每天一次。拆开后 `routes/pages/` 下的文件与页面一一对应，谁改谁的。
 
-**v3.4 修正：`style.css` 拆成三个。** 下载页和管理页的样式本来就没有交集（一个是平铺区块 + 表格，一个是表单 + 状态条），合在一个文件里只是图省事。`base.css` 放两者都用的重置、字体、顶部导航，阶段 0 写完冻结；`download.css` 给 A、`admin.css` 给 B。这条是按页面分工的前置条件，不拆就没法切干净。
+**`style.css` 拆成三个。** 下载页和管理页的样式本来就没有交集（一个是平铺区块 + 表格，一个是表单 + 状态条），合在一个文件里只是图省事。`base.css` 放两者都用的重置、字体、顶部导航，阶段 0 写完冻结；`download.css` 给 A、`admin.css` 给 B。这条是按页面分工的前置条件，不拆就没法切干净。
 
 **为什么磁盘结构和 HTTP DTO 分开**：`catalog/types.js` 是磁盘格式，`routes/dto.js` 是响应格式。混用的后果是——API 想加个 `download_url`，结果写进了 `releases.json`；想把 `uploaded_ip` 从响应里去掉，历史记录也跟着少字段。分开的代价只是一个二十行的映射函数。
 
@@ -476,27 +455,25 @@ online_exe/
 | `platform` | `windows7` / `windows10` / `macos` / `linux`。Win7 与 Win10 是两个独立平台，不是同一平台的两种标签 |
 | `arch` | `x64` / `arm64` / `ia32`，与 platform 组合受 8 组白名单约束 |
 | `major/minor/patch` | 拆成整数存，`1.10.0` 与 `1.9.0` 才能正确比大小 |
-| `is_prerelease` | **同时承担「渠道」语义**：`false` = 正式版，`true` = 预发布。不再单设 `channel` 字段 |
+| `is_prerelease` | **同时承担「渠道」语义**：`false` = 正式版，`true` = 预发布。不设独立的 `channel` 字段 |
 | `object_key` | 磁盘相对路径，程序生成，绝不用用户文件名。墓碑记录保留该字段（指向已删除的文件），不要置空——置空后无法判断"这条记录当初存在哪个路径" |
 | `uploaded_at` | **一律存 UTC**（`Z` 结尾），渲染时按 `TZ` 转本地 |
 | `uploaded_ip` | 内网无账号，靠这条留痕。**填之前先确认 Docker 网络模式能拿到真实源 IP**，见 6.4 |
-| `status` | **发版人的意图**：`active`（在架）/ `yanked`（已撤回）/ `deleted`（墓碑）。**v3.3 修正**：去掉 `broken`，文件是否缺失改由独立字段表达 |
+| `status` | **发版人的意图**：`active`（在架）/ `yanked`（已撤回）/ `deleted`（墓碑）。文件是否缺失由 `file_missing` 单独表达，不放进这个字段 |
 | `file_missing` | **磁盘的客观事实**：对账发现文件不在时置 `true`。与 `status` 正交——一个 `yanked` 的记录也可能 `file_missing` |
 
-#### 为什么删掉了 `channel` 和 `force_update`
+#### 为什么没有 `channel` 和 `force_update`
 
-上一版有 `channel: stable|beta` 和 `force_update: bool` 两个字段，两个都站不住：
+两个字段都被明确排除，理由分别是：
 
-- **`channel` 与 `is_prerelease` 完全冗余**。`1.3.0-beta.1` 本来就从 semver 的 prerelease 段能看出是预发布，再挂一个 `channel=beta` 就是两个维度表达同一件事，而且没有约束——会造出「`1.3.0` 正式版挂在 beta 渠道」这种奇怪数据。删掉 `channel`，`is_prerelease` 就是渠道。
+- **`channel` 与 `is_prerelease` 完全冗余**。`1.3.0-beta.1` 本来就从 semver 的 prerelease 段能看出是预发布，再挂一个 `channel=beta` 就是两个维度表达同一件事，而且没有约束——会造出「`1.3.0` 正式版挂在 beta 渠道」这种奇怪数据。`is_prerelease` 就是渠道。
 - **`force_update` 没有任何消费方**。方案明确不做自动更新接口，客户端不会来查这个字段；下载页也没有展示它的位置。传了没人读的字段只会让人以为这个功能存在。真需要「强制更新」提示，等做客户端更新接口时再加。
 
-#### `channel` 从唯一键移除的连带影响
+#### 唯一键为什么是 `(platform, arch, version)`
 
-唯一键从 `(platform, arch, channel, version)` 收敛为 **`(platform, arch, version)`**。
+必须回答一个问题：允许 `1.3.0` 同时以 stable 和 beta 存在吗？如果允许，`/dl/1.3.0/windows10-x64` 到底返回哪一份？下载 URL 里没有渠道信息，这个歧义无解。
 
-原因是一个必须回答的问题：允许 `1.3.0` 同时以 stable 和 beta 存在吗？如果允许，`/dl/1.3.0/windows10-x64` 到底返回哪一份？下载 URL 里没有 channel，这个歧义无解。
-
-收敛之后语义很干净：**同一个 platform+arch 下，一个版本号对应唯一一份内容**——这正是「版本号不可变」的延伸。
+所以唯一键**不含渠道**，语义很干净：**同一个 platform+arch 下，一个版本号对应唯一一份内容**——这正是「版本号不可变」的延伸。
 
 **`downloads` 不在这里**。计数单独存 `data/stats.json`，key 用**完整 id**，渲染时按 id 合并：
 
@@ -506,16 +483,9 @@ online_exe/
 
 不用短 id——截取后 8 位虽然碰撞概率低，但没有任何收益，只会让人对着两份数据怀疑「这是不是同一条」。
 
-**schema 版本**：现在是 `3`。
+**schema 版本**：`3`。解析到**大于**当前版本的 `schema` 时拒绝启动并提示升级程序；小于当前版本的按字段补默认值（缺 `file_missing` 补 `false`）。迁移前先复制一份 `releases.json.bak`——这是唯一一处会批量改写历史记录的操作。
 
-| 旧版本 | 升级动作 |
-|---|---|
-| `1`（v3.0） | 忽略 `channel` / `force_update` |
-| `2`（v3.2 → v3.3） | **v3.3 修正**：`status === 'broken'` 的记录改写为 `status = 'active'`（若是被对账覆盖过的撤回记录，需要人工确认）+ `file_missing = true`；其余记录补 `file_missing = false` |
-
-看到**大于**当前版本的，拒绝启动并提示升级程序。迁移前先复制一份 `releases.json.bak`——这是唯一一处会批量改写历史记录的操作。
-
-#### 落盘策略（Node 版要注意 fsync 和串行化）
+#### 落盘策略（fsync 与串行化）
 
 - 元数据变更：写 `releases.json.tmp` → **`fsync`** → `rename` 覆盖 → fsync 目录
 - 下载计数：内存累加，每 30 秒或累计 100 次批量写 `stats.json`
@@ -538,7 +508,7 @@ async function writeAtomic(target, data) {
   await fs.rename(tmp, target)
 
   // 目录也要 fsync，否则 rename 本身可能没落盘（Linux 有效）
-  // v3.3 修正：Windows / 部分文件系统上对目录 fsync 会抛 EACCES / EINVAL，
+  // Windows / 部分文件系统上对目录 fsync 会抛 EACCES / EINVAL，
   // 这一步失败不影响数据正确性（只是崩溃时的持久性弱一点），不能让它把整个写操作判失败
   try {
     const dir = await fs.open(path.dirname(target), 'r')
@@ -575,13 +545,13 @@ function enqueueWrite(fn) {
 | 预发布回落 | 某平台只有预发布版本时，`latest` 回落到最高的预发布并标 Beta |
 | 撤回 | `status='yanked'`，文件保留，列表灰显，直链仍可下 |
 | 删除 | `DELETE /api/releases/:id`，前端二次确认（输入版本号）；**只删文件、记录改墓碑**，见下 |
-| 渠道 | **由 `is_prerelease` 表达**：`false` = stable，`true` = beta。不再有独立字段 |
+| 渠道 | **由 `is_prerelease` 表达**：`false` = stable，`true` = beta，没有独立字段 |
 
 各平台独立取最新：**Win7 停 1.2.0、Win10 已到 1.4.0 是正常状态**，不要求 Win7 追上 Win10。
 
 `windows7` 和 `windows10` 的唯一键互不影响：同一个 `1.3.0` 可以同时存在两份包，这是常态不是重复上传。
 
-#### v3.3 修正：`v` 前缀必须在入口归一化
+#### `v` 前缀必须在入口归一化
 
 允许输入 `v1.3.0` 是个体验问题，但 **`version` 同时是唯一键和磁盘路径**（`data/releases/{version}/`）：
 
@@ -591,9 +561,9 @@ function enqueueWrite(fn) {
 
 所以：**入口处 `const version = raw.replace(/^v/i, '')`，之后所有环节（唯一键、路径、JSON、URL）一律用归一化后的值**。原始输入只写进日志。
 
-#### v3.3 修正：删除是「墓碑」，不是物理消失
+#### 删除是「墓碑」，不是物理消失
 
-v3.2 的 `DELETE` 是真删记录 + 真删文件。这留下一个漏洞：**删掉再以同一版本号传新包，内容就变了，而下载 URL 没变**——这正好击穿 4.6 的 `Cache-Control: immutable` 和本节「版本号不可变」的底线。用户缓存了旧 `1.3.0`，永远看不到新包，报障时谁也说不清。
+`DELETE` 不能真删记录 + 真删文件。那会留下一个漏洞：**删掉再以同一版本号传新包，内容就变了，而下载 URL 没变**——这正好击穿 4.6 的 `Cache-Control: immutable` 和本节「版本号不可变」的底线。用户缓存了旧 `1.3.0`，永远看不到新包，报障时谁也说不清。
 
 改成墓碑：
 
@@ -609,7 +579,7 @@ rel.file_missing = false      // 墓碑不是「文件意外丢失」，是「�
 - 管理页默认不显示墓碑行，筛选项「已删除」可查
 - 查重逻辑天然拦住：`existing && existing.file_missing !== true` → 409，墓碑也会命中
 - `latest()` 只认 `status === 'active'`，墓碑自动排除
-- **v3.3 修正：对账必须跳过墓碑**。否则重启时对账发现「记录在、文件没了」，会把墓碑标成 `file_missing = true`，查重条件随即放行——不可变保护被自己绕开了。见 4.0.2
+- **对账必须跳过墓碑**。否则重启时对账发现「记录在、文件没了」，会把墓碑标成 `file_missing = true`，查重条件随即放行——不可变保护被自己绕开了。见 4.0.2
 - 墓碑占的空间可以忽略（几百字节），换来不可变性不会被绕过
 
 #### `file_missing` 记录的重传例外
@@ -626,13 +596,13 @@ if (existing && existing.file_missing !== true) {
 // 文件缺失的记录：允许重传补齐
 ```
 
-**v3.3 修正：重传必须沿用原 `id`。** v3.2 写的是「id 重新生成，stats 计数保留」——这两句自相矛盾：`stats.json` 的 key 就是 `id`，`id` 换了计数必然对不上，除非再写一段迁移逻辑。
+**重传必须沿用原 `id`。** `stats.json` 的 key 就是 `id`，`id` 换了计数必然对不上，除非再写一段迁移逻辑。
 
 改为 `buildRecord({ id: existing?.id ?? newId(), ... })`。同一条版本记录从头到尾只有一个 `id`，下载计数、`uploaded_at` 之外的元数据都自然延续。
 
 注意墓碑（`status === 'deleted'`）**不适用**这个例外——它的 `file_missing` 是 `false`，会正常命中 409。删掉就是删掉了，想再发就换版本号。
 
-#### 为什么砍掉覆盖
+#### 为什么不支持覆盖
 
 允许覆盖同版本，跟下载侧的 `Cache-Control: immutable` 是**直接冲突**的：浏览器缓存了 `/dl/1.3.0/windows10-x64` 之后一年内不再发请求，包覆盖了也拿不到新的，用户只会说「我下了但程序没变」，极难排查。
 
@@ -650,7 +620,7 @@ if (existing && existing.file_missing !== true) {
 4. 排序键：major → minor → patch 降序，同版本按 uploaded_at 降序
 ```
 
-**下载页的「各平台当前版本摘要」用的就是这个函数的结果**。某平台只有预发布版本时，摘要显示该预发布版本并在后面标 `Beta`，而不是显示「暂无版本」。**v3.3 修正**：是 8 个 `platform-arch` 组合各自调用一次 `latest()`、互不影响（原文写「三个平台」，与 4 个 OS / 8 个组合都不符）；摘要把 8 个结果聚合成 4 行的规则见 4.7。
+**下载页的「各平台当前版本摘要」用的就是这个函数的结果**。某平台只有预发布版本时，摘要显示该预发布版本并在后面标 `Beta`，而不是显示「暂无版本」。注意是 8 个 `platform-arch` 组合各自调用一次 `latest()`、互不影响；摘要把 8 个结果聚合成 4 行的规则见 4.7。
 
 管理页的渠道筛选则直接读 `is_prerelease` 字段，不经过 `latest()`。
 
@@ -668,15 +638,15 @@ if (existing && existing.file_missing !== true) {
 | multipart | `file` | ✅ | 二进制产物 |
 | multipart | `changelog` | | 更新说明，可多行 |
 
-**为什么元数据必须走 query，不能放在 multipart 字段里**：multipart 的各个 part 是按客户端上传顺序依次到达的。浏览器 `FormData` 和 `curl -F` 的顺序不一定把普通字段排在文件前面——如果 `file` part 先到，服务端此时还拿不到 `version` 和 `platform`，就没法算唯一键、没法查重、没法定临时文件路径，只能要么把整个文件先丢进一个随机临时文件等着（2GB 白传），要么靠客户端自觉。
+**为什么元数据必须走 query，不能放在 multipart 字段里**：multipart 的各个 part 是按客户端上传顺序依次到达的。浏览器 `FormData` 和 `curl -F` 的顺序不一定把普通字段排在文件前面——如果 `file` part 先到，服务端此时还拿不到 `version` 和 `platform`，就没法算唯一键、没法查重、没法定临时文件路径，只能要么把整个文件先丢进一个随机临时文件等着（400MB 白传），要么靠客户端自觉。
 
 query string 在 HTTP 请求行里，**一定先于 body 到达**，解析它不需要等任何字节。这样「查重 → 占位 → 空间预检」全部能在开始接收文件之前完成。
 
 `changelog` 留在 multipart 里，是因为它可能很长（多行文本），塞进 URL 会被 8KB 长度限制卡住；它也不参与路径决策，晚到无所谓。
 
-**没有 `overwrite`、`channel`、`force_update`**：覆盖已取消（4.4），渠道由 `is_prerelease` 表达（4.3），`force_update` 没有消费方。
+**没有 `overwrite`、`channel`、`force_update`**：不支持覆盖（4.4），渠道由 `is_prerelease` 表达（4.3），`force_update` 没有消费方。
 
-#### 并发控制：Node 版反而更简单
+#### 并发控制：单线程反而是优势
 
 Node 是单线程事件循环，**同步代码块不会被其他请求打断**。所以「查重 + 占位」写在一个同步块里天然原子：
 
@@ -711,9 +681,9 @@ inflight.set(key, Date.now())
 9. 提交（串行队列内）：再次查重 → `rename(tmp → package.bin)` → 写 JSON → **更新内存索引** → 删 inflight、扣回预留额度
 10. 返回 201 + 记录 JSON（含 sha256 与 size）
 
-**空间系数是 1.1，不是 2**。上一版写的「临时文件 + rename，同一时刻两份数据」是错的：`rename` 只改目录项，不复制数据，同一个 inode 换个名字而已，峰值就是一份。留 10% 余量给目录项和日志足够，按 2 倍算会白白浪费一半磁盘预算。
+**空间系数是 1.1，不是 2**。「临时文件 + rename 意味着同一时刻两份数据」是错的：`rename` 只改目录项，不复制数据，同一个 inode 换个名字而已，峰值就是一份。留 10% 余量给目录项和日志足够，按 2 倍算会白白浪费一半磁盘预算。
 
-**v3.3 修正：单次预检挡不住并发。** 第 3 步是典型的 TOCTOU——8 个请求各自读一次 `freeBytes()` 都看到「剩余够」，然后同时开始写，最后一起撞 ENOSPC。验收清单第 8 条恰恰要求 8 个并发全部成功。
+**单次预检挡不住并发。** 第 3 步是典型的 TOCTOU——8 个请求各自读一次 `freeBytes()` 都看到「剩余够」，然后同时开始写，最后一起撞 ENOSPC。验收清单第 8 条恰恰要求 8 个并发全部成功。
 
 补一个内存累加器，让预检看的是「扣掉别人已占额度之后的可用空间」：
 
@@ -761,7 +731,7 @@ import fs from 'node:fs/promises'
 const bb = Busboy({
   headers: req.headers,
   defParamCharset: 'utf8',   // 默认 latin1，中文 filename 会直接乱码
-  // v3.3 修正：limits.fields 默认是 Infinity，不设它 fieldsLimit 永远不会触发，
+  // limits.fields 默认是 Infinity，不设它 fieldsLimit 永远不会触发，
   // 下面那个监听就是死代码。显式给个上限，异常请求才有边界
   limits: { fileSize: cfg.maxUploadMb * 1024 * 1024, files: 1, fields: 10, fieldSize: 64 * 1024 },
 })
@@ -774,7 +744,7 @@ const taskErrors = []        // 任务内部的失败，交给 commit 统一判�
 bb.on('file', (name, stream) => {
   tmpPath = storage.tmpPath(version, platform, arch)   // 唯一名，与目标同目录
 
-  // ★ v3.3 修正：必须在这里立刻 catch，不能只 push 一个裸 promise。
+  // ★ 必须在这里立刻 catch，不能只 push 一个裸 promise。
   //   abort 路径下 commit() 永远不会执行，tasks 里的 promise 就没人 await；
   //   而 pipeline 在客户端断开时会 reject，Node 默认
   //   --unhandled-rejections=throw —— 未处理的 rejection 直接作为
@@ -828,7 +798,7 @@ function abort(code, msg) {
   if (state !== 'receiving') return    // 防重入：只清理一次
   state = 'aborted'
 
-  // v3.3 修正：先等 pipeline 收尾，再删文件。
+  // 先等 pipeline 收尾，再删文件。
   // 直接 cleanup() 会和还在写的 writeStream 抢同一个路径 ——
   // unlink 在 open 之前执行会 ENOENT，之后 createWriteStream 又把文件建出来，
   // 结果留下一个没人认领的 .tmp（只能靠下次启动清理兜底）。
@@ -853,9 +823,8 @@ async function commit() {
     await Promise.all(tasks)                    // 等全部文件任务收尾（内部已 catch，这里不会抛）
     if (taskErrors.length > 0) throw taskErrors[0]   // 但要把任务内部的失败捞出来
 
-    // v3.3 修正：必须接住 enqueueWrite 的返回值。
-    // v3.2 写的是「enqueueWrite(...); ... res.json(toReleaseDto(rec))」，
-    // 而 rec 定义在箭头函数内部 —— 那个作用域外面根本拿不到，运行时必然 ReferenceError
+    // 必须接住 enqueueWrite 的返回值：rec 定义在箭头函数内部，
+    // 外面写 res.json(toReleaseDto(rec)) 会拿不到变量，运行时 ReferenceError
     const rec = await enqueueWrite(async () => {   // 串行：再次查重 + rename + 写 JSON + 更新内存
       const cur = catalog.get(key)
       if (cur && cur.file_missing !== true) throw new Error('DUPLICATE')
@@ -881,7 +850,7 @@ async function commit() {
     state = 'aborted'
     await cleanup()
     if (!res.headersSent) {
-      // v3.3 修正：错误码映射集中一处，别在状态码上写三元套三元
+      // 错误码映射集中一处，别在状态码上写三元套三元
       const code = { DUPLICATE: 409, NO_FILE: 400, FILE_TOO_LARGE: 413 }[err.message] ?? 500
       res.status(code).json({ error: err.message })
     }
@@ -898,7 +867,7 @@ async function commit() {
 
 **几个必须注意的点**：
 
-- **不要用 multer**。它默认 `memoryStorage` 会把整个文件读进内存，2GB 直接 OOM；`diskStorage` 虽然落盘，但拿不到「边写边算哈希」的时机。
+- **不要用 multer**。它默认 `memoryStorage` 会把整个文件读进内存，400MB 就是 400MB 常驻；`diskStorage` 虽然落盘，但拿不到「边写边算哈希」的时机。
 - **哈希必须走 Transform，不能挂 `data` 事件**。`stream.on('data')` 会让流进入 flowing 模式，与 `pipeline` 争夺数据源。
 - `pipeline` 会自动处理背压，**不要自己写 `chunk => ws.write(chunk)`**——写盘跟不上时内存会暴涨。
 - busboy 的文件大小限制事件在 **file stream** 上（`stream.on('limit')`），不在 Busboy 实例上。而且超限时 `pipeline` 通常是正常结束而不是抛错，必须靠标记位判断。
@@ -906,7 +875,7 @@ async function commit() {
 - **临时文件名必须唯一**，固定名字在并发时互相覆盖，最后写出的包内容不完整但 sha256 记的是其中一次的，查都查不出来。
 - 磁盘文件名一律程序生成 `package.bin`，**用户原始文件名只进 JSON 用于展示**。中文名、`../`、`CON`/`NUL` 这类 Windows 保留字，拿去拼路径就会出事。
 - **客户端断开要清理**：监听 `req.on('close')` 并检查 `req.complete === false`。不要用已废弃的 `req.on('aborted')`——它在 Node 16 之后行为已变，`aborted` 事件不再可靠。
-- **v3.3 修正：失败路径上的 promise 必须有 `.catch`**。这是本节最容易漏、后果最重的一条。`tasks` 数组只在 `commit()` 里被消费，可 `abort()` 路径根本走不到 `commit()`。任何推进 `tasks` 的异步任务都必须当场挂 `.catch`，否则 Node 15+ 的默认 `--unhandled-rejections=throw` 会把它当作未捕获异常，**整个进程退出**——不是这一个上传失败，是全部在传的上传一起废掉。同理，`req.pipe(bb)` 之外任何「发出去就不管」的 promise 都要审一遍。
+- **失败路径上的 promise 必须有 `.catch`**。这是本节最容易漏、后果最重的一条。`tasks` 数组只在 `commit()` 里被消费，可 `abort()` 路径根本走不到 `commit()`。任何推进 `tasks` 的异步任务都必须当场挂 `.catch`，否则 Node 15+ 的默认 `--unhandled-rejections=throw` 会把它当作未捕获异常，**整个进程退出**——不是这一个上传失败，是全部在传的上传一起废掉。同理，`req.pipe(bb)` 之外任何「发出去就不管」的 promise 都要审一遍。
 
 CI 用法：
 
@@ -923,9 +892,7 @@ curl -X POST "http://10.20.3.10:8080/api/releases?version=1.3.0&platform=windows
 
 `combo` 形如 `windows10-x64`、`windows7-ia32`、`macos-arm64`，服务端按 `-` 切成 platform 和 arch。
 
-**建议写成 `:combo` 自己 split，而不是 `/:platform-:arch`。** v3.2 给的理由是「path-to-regexp 在不同小版本间对相邻参数夹字面量的解析有变化」，**这个理由不成立**——v8 文档明确参数名是合法 JavaScript 标识符、遇到非法字符即终止，`/:platform-:arch` 是被正常支持的。
-
-真正值得写成 `:combo` 的原因只有一条：**校验和报错集中在一处**。路由层只拿到一个不透明字符串，`split` 后统一判 `parts.length === 2` 并做白名单校验，错误处理不需要散落在路由解析和 handler 两处。
+**写成 `:combo` 自己 split，而不是 `/:platform-:arch`。** 后者其实被 path-to-regexp 正常支持（v8 文档：参数名是合法 JavaScript 标识符，遇非法字符即终止），所以理由不是「解析有风险」，而是**校验和报错要集中在一处**：路由层只拿到一个不透明字符串，`split` 后统一判 `parts.length === 2` 并做白名单校验，错误处理不需要散落在路由解析和 handler 两处。
 
 ```js
 const parts = String(req.params.combo || '').split('-')
@@ -934,7 +901,7 @@ const [platform, arch] = parts
 if (!PLATFORM_ARCH_SET.has(`${platform}-${arch}`)) return res.status(404).send('not found')
 ```
 
-**v3.3 修正**：v3.2 直接 `const [platform, arch] = combo.split('-')`，对 `windows10-x64-extra` 这种输入会静默取前两段并命中记录——本来该 404 的请求返回了一个真实文件。多余段必须显式拒绝。
+**段数必须严格校验**：`combo.split('-')` 后对 `windows10-x64-extra` 这种输入，若直接取前两段会静默命中一条真实记录——本来该 404 的请求返回了文件。多余段必须显式拒绝，见上面的代码。
 
 | 要点 | 做法 |
 |---|---|
@@ -959,7 +926,7 @@ res.setHeader('Content-Disposition',
 
 **不要再用 `req.fresh` 做计数判断**。`req.fresh` 依赖 `res` 上已经设置了 `ETag` 才能比较，而计数发生在 `sendFile` 之前、响应头还没设，此时它恒为 `false`；等 `sendFile` 之后再判断，响应已经发出去了。所以固定为「到达服务端的请求都计数」，语义是「用户点了一次下载」，这个数字对发版场景够用，不要写那种实际不生效的优化。
 
-**v3.3 修正：计数的口径要写准，别自欺欺人。** v3.2 说「304 也 +1」来弥补缓存命中——但在 `immutable` 生效的场景下浏览器**根本不会发请求**，连 304 都没有。所以这个数字的真实含义是：
+**计数的口径要写准，别自欺欺人。** 用「304 也 +1」来弥补缓存命中是无效的——在 `immutable` 生效的场景下浏览器**根本不会发请求**，连 304 都没有。所以这个数字的真实含义是：
 
 - 包含：首次下载、强制刷新、直接用 `curl` 拉
 - 不包含：`immutable` 有效期内的重复下载（浏览器本地消化，服务端零感知）
@@ -978,11 +945,11 @@ if (isNewDownload) stats.inc(rel.id)
 
 我们只认内容哈希：关掉 `lastModified`，ETag 用 sha256。缓存语义收敛成一个判据，不会互相打架。
 
-**`immutable` 成立的前提是版本号不可变**。因为已经砍掉覆盖（见 4.4），同一个 URL 永远对应同一份内容，这个缓存头才敢设一年。
+**`immutable` 成立的前提是版本号不可变**。因为不支持覆盖（见 4.4），同一个 URL 永远对应同一份内容，这个缓存头才敢设一年。
 
 ```js
 export async function download(req, res, next) {
-  // v3.3 修正：段数不对直接 404，不给「取前两段」的机会
+  // 段数不对直接 404，不给「取前两段」的机会
   const parts = String(req.params.combo || '').split('-')
   if (parts.length !== 2) return res.status(404).send('not found')
   const [platform, arch] = parts
@@ -991,7 +958,7 @@ export async function download(req, res, next) {
   const rel = catalog.find(req.params.version, platform, arch)
   if (!rel) return res.status(404).send('not found')
 
-  // v3.3 修正：墓碑不是「文件缺失」，直接 404，别让用户以为包坏了还能修
+  // 墓碑不是「文件缺失」，直接 404，别让用户以为包坏了还能修
   if (rel.status === 'deleted') return res.status(404).send('not found')
 
   const abs = storage.abs(rel.object_key)
@@ -1001,7 +968,7 @@ export async function download(req, res, next) {
     return res.status(410).send('包文件缺失，请联系发版人重新上传')
   }
 
-  // v3.3 修正：断点续传会发多个 Range 请求，只让「新下载」计数
+  // 断点续传会发多个 Range 请求，只让「新下载」计数
   const range = req.headers.range
   if (!range || /^bytes=0-/.test(range)) stats.inc(rel.id)
 
@@ -1059,7 +1026,7 @@ HTML + CSS + 原生 JavaScript **ES5**，无框架、无 TypeScript、无构建�
 | **管理页 JS** | **现代 JS（ES2020+），`fetch` 可用**（约 60 行） | 只在 Chrome/Edge 跑，IE 打开会显示兜底提示 |
 | 静态资源 | `express.static(...)` | 本地文件，不走 CDN；**不要设长缓存** |
 
-**v3.3 修正：ESM 下没有 `__dirname`，且不要用相对 cwd 的路径。** `express.static('public')` 和 `app.set('views', 'views')` 都依赖进程工作目录——容器里 `WORKDIR /app` 恰好对得上，但 `docker exec` 进容器、systemd 启动、或将来换工作目录，就会静默 404。统一用 `import.meta.dirname`（Node 20.11+，24 原生支持）：
+**ESM 下没有 `__dirname`，不要用相对 cwd 的路径。** `express.static('public')` 和 `app.set('views', 'views')` 都依赖进程工作目录——容器里 `WORKDIR /app` 恰好对得上，但 `docker exec` 进容器、systemd 启动、或将来换工作目录，就会静默 404。统一用 `import.meta.dirname`（Node 20.11+，24 原生支持）：
 
 ```js
 import path from 'node:path'
@@ -1069,7 +1036,7 @@ app.set('views', path.join(root, 'views'))
 app.use(express.static(path.join(root, 'public')))
 ```
 
-**两个页面的 JS 标准不一样，这一点必须写进文件顶部注释**。下载页面向所有内网用户，其中包含 Win7 + IE11；管理页只有发版人自己用，用现代语法没关系。上一版技术栈表写「全部 ES5」，同时又写「管理页可以放开写」，两句话自相矛盾——现在拆成两行，各管各的。
+**两个页面的 JS 标准不一样，这一点必须写进文件顶部注释**。下载页面向所有内网用户，其中包含 Win7 + IE11；管理页只有发版人自己用，用现代语法没关系。技术栈表里两页各占一行，各管各的，别「顺手统一」。
 
 **EJS 没有内置 layout**。依赖里只有 `express`/`busboy`/`ejs`，没有 `express-ejs-layouts`，所以别指望放一个 `layout.ejs` 就能自动套壳——它必须靠 include 显式用。改用：
 
@@ -1110,7 +1077,7 @@ views/
 只读，没有任何写操作。
 
 - 顶部：应用名 + **各平台当前版本摘要**（如「Win7 1.2.0 / Win10 1.4.0 / macOS 1.4.0 / Linux 1.3.0」）。8 个组合各自独立发版，显示单个全局版本号会误导用户
-- **v3.3 修正：摘要是 4 个 OS，但数据是 8 个组合，聚合规则必须写死**。`latest()` 的签名是 `(platform, arch)`，而摘要把一个 OS 压成一行，遇到「macOS arm64 是 1.4.0、x64 还是 1.3.0」就没有答案了。规则定为：
+- **摘要是 4 个 OS，但数据是 8 个组合，聚合规则必须写死**。`latest()` 的签名是 `(platform, arch)`，而摘要把一个 OS 压成一行，遇到「macOS arm64 是 1.4.0、x64 还是 1.3.0」就没有答案了。规则定为：
   1. 取该 OS 下各 arch 的 `latest()`，再取其中**版本最高**的那个作为摘要版本
   2. 各 arch 版本不一致时，摘要后面加一个 `*`，下方一行小字列出「arm64 1.4.0 / x64 1.3.0」
   3. 区块内的卡片**永远按 arch 逐张展示**，摘要只是概览，不能替代卡片
@@ -1121,7 +1088,7 @@ views/
 - 每个区块内按架构排列下载卡片：版本、大小、更新时间、下载按钮
 - Win7 区块顶部常驻提示：「需 Windows 7 SP1；安装失败请先装 VC++ 2015-2019 运行库」。**不要在这里提 KB3140245**——那是 TLS 1.2 补丁，当前走 HTTP 用不上，写在下载页只会让人去装一个无关的补丁
 - 版本历史表格：版本、平台、大小、时间、更新说明、下载
-- 预发布版本（`is_prerelease`）和 `yanked` 版本默认折叠，灰标；`deleted`（墓碑）**完全不显示**；`file_missing` 的行红标「缺文件」且下载按钮置灰（v3.3 修正）
+- 预发布版本（`is_prerelease`）和 `yanked` 版本默认折叠，灰标；`deleted`（墓碑）**完全不显示**；`file_missing` 的行红标「缺文件」且下载按钮置灰
 - 只有预发布版本的平台，卡片标 `Beta` 并提示「暂无正式版」
 - macOS 卡片下附 Gatekeeper 放行步骤（见第 5 节）
 
@@ -1131,7 +1098,7 @@ views/
 
 不要求兼容 IE11，但要做**兜底提示**：否则发版人误用 IE 打开会看到一片空白，第一反应是「服务挂了」。
 
-**v3.3 修正**：v3.2 写「`<head>` 里检测到 IE 后中止渲染」——做不到。页面是服务端 EJS 渲染好的，`<head>` 里的脚本执行时 HTML 已经完整下发，没有「中止」这个动作（`document.write` 强插会打乱文档结构）。
+**兜底提示不能靠「`<head>` 里中止渲染」**——做不到。页面是服务端 EJS 渲染好的，`<head>` 里的脚本执行时 HTML 已经完整下发，没有「中止」这个动作（`document.write` 强插会打乱文档结构）。
 
 可行做法是**打标记 + CSS 隐藏**：`<html>` 上先带一个默认类，脚本命中 IE 就换成 `ie-blocked`，主体隐藏、提示块显示：
 
@@ -1165,7 +1132,7 @@ IE11 里 CSS 完全可用，这个方案不依赖任何脚本能力，也不需�
 
 磁盘剩余 / 总量、版本总数、占用合计、**孤儿文件 N 个 / 共 X MB**。常驻顶部，不用滚到底才发现盘满了。
 
-**v3.3 修正**：「版本总数」和「占用合计」都要排除 `deleted`（墓碑）。否则删掉一个版本后数字纹丝不动，用户会以为删除失败，接着反复点。墓碑不计入总数、不占空间（文件已删），只在「已删除」筛选里可见。
+**「版本总数」和「占用合计」都要排除 `deleted`（墓碑）。** 否则删掉一个版本后数字纹丝不动，用户会以为删除失败，接着反复点。墓碑不计入总数、不占空间（文件已删），只在「已删除」筛选里可见。
 
 孤儿文件那一项可点开，列出具体路径和大小，支持单个删除和「全部清理」。对账把它们挪进 `data/orphan/` 只是保护措施，如果没有入口，这个目录会悄悄涨满磁盘——跟「启动清理 tmp」要解决的是同一类问题，不能只清不展示。
 
@@ -1173,10 +1140,10 @@ IE11 里 CSS 完全可用，这个方案不依赖任何脚本能力，也不需�
 
 - 拖拽 + 点击选文件，`XMLHttpRequest.upload.onprogress` 显示进度条与速率
 - 上传地址拼 query：`POST /api/releases?version=1.3.0&platform=windows10&arch=x64`，`FormData` 里只放 `file` 和 `changelog`
-- 表单字段：**版本号、平台、架构、更新说明**。**v3.3 修正**：没有「渠道」和「强制更新」——两者已在 v3.2 从数据模型删除（见 4.3），渠道由 semver 的 prerelease 段自动派生，页面上只在填完版本号后回显一个只读的「预发布 / 正式」标签
+- 表单字段：**版本号、平台、架构、更新说明**。没有「渠道」和「强制更新」——渠道由 semver 的 prerelease 段自动派生，页面上只在填完版本号后回显一个只读的「预发布 / 正式」标签
 - 平台 / 架构用下拉，只允许 8 组合法组合；**`windows7` 和 `windows10` 是两个独立选项**，旁边标一句「同一份代码需分别构建」
 - **覆盖度提示**：填完版本号后实时显示「1.3.0 已覆盖 5/8 组合」，点开可看还差哪几个（只提示，不阻止提交）
-- **表单记忆**：版本号、平台、架构存 `sessionStorage`。一次发版要连传 8 个包，不记忆就得重复填 8 遍（**v3.3 修正**：原来写「版本号和渠道」，渠道已不存在）
+- **表单记忆**：版本号、平台、架构存 `sessionStorage`。一次发版要连传 8 个包，不记忆就得重复填 8 遍
 - **版本冲突提示**：409 时明确写出「1.3.0 / windows10 / x64 已存在，请改用 1.3.1」，并自动把版本号 +1 到 patch 位
 - 上传成功后：列表自动刷新，新增行高亮 3 秒，展示 sha256 前 8 位供核对
 - 上传失败（超限 / 磁盘不足 / 连接中断）时，临时文件必须已清理，页面提示可重试
@@ -1184,7 +1151,7 @@ IE11 里 CSS 完全可用，这个方案不依赖任何脚本能力，也不需�
 **③ 版本列表区**
 
 - 按上传时间倒序，每行：版本、平台、架构、大小、时间、状态、操作
-- 操作列**按状态区分**，不要给所有行同一套按钮（**v3.3 修正**：状态与「文件是否缺失」是两个维度，按钮要按组合给）：
+- 操作列**按状态区分**，不要给所有行同一套按钮（状态与「文件是否缺失」是两个维度，按钮要按组合给）：
   - `active` + 文件在：`撤回` / `删除`
   - `active` + `file_missing`：`重新上传`（跳到上传区并预填版本和平台）/ `删除`
   - `yanked` + 文件在：`恢复` / `删除`
@@ -1193,7 +1160,7 @@ IE11 里 CSS 完全可用，这个方案不依赖任何脚本能力，也不需�
 - `file_missing` 是「记录在、文件没了」的事实，与是否已撤回无关。用户想修复只有两条路：重新上传同版本（4.4 的查重对 `file_missing` 放行），或者删掉记录重来。如果只给「删除」，用户得先删再传，多一步且容易忘；给「重新上传」按钮是更自然的引导
 - `删除` 需输入版本号二次确认，`撤回` 单击即可（可逆）。删除是墓碑，**不可恢复**，文案要写「删除后该版本号作废，不可再上传同版本」
 - 筛选项：平台、状态（全部 / 正式 / 预发布 / 已撤回 / 缺文件 / 已删除）
-- 底部「清理建议」：列出每个 `platform-arch` 组合除最近 `KEEP_PER_PLATFORM` 个版本之外的旧包及占用，**只列出，不自动删**（**v3.3 修正**：原来写「每个平台」，实际口径是 8 个组合，不是 4 个 OS）
+- 底部「清理建议」：列出每个 `platform-arch` 组合除最近 `KEEP_PER_PLATFORM` 个版本之外的旧包及占用，**只列出，不自动删**。口径是 8 个组合，不是 4 个 OS
 
 为什么上传和列表必须同页：传完一个新包，最需要的动作是「确认它真的进去了、大小对不对、sha256 对不对」。列表在另一个页面，人就只能靠记忆或刷新两次来确认。
 
@@ -1202,8 +1169,8 @@ IE11 里 CSS 完全可用，这个方案不依赖任何脚本能力，也不需�
 ```bash
 PORT=8080                      # 监听端口
 DATA_DIR=/data                 # 数据目录（容器内固定 /data）
-MAX_UPLOAD_MB=2048             # 单包上限，busboy limits.fileSize 用
-KEEP_PER_PLATFORM=10           # 清理建议保留数（只提示，不自动删）
+MAX_UPLOAD_MB=800              # 单包上限；实际产物 300–400MB，留 2 倍余量
+KEEP_PER_PLATFORM=5            # 清理建议保留数（只提示，不自动删）；5 版 ≈ 16GB
 APP_NAME=核心力量              # 仅在首次初始化 releases.json 时写入
 TZ=Asia/Shanghai               # 时区；日志与页面渲染都按此转换
 ADMIN_ALLOW_CIDR=              # 空=不限制；填 10.20.0.0/16 则只允许该网段访问 /admin 与写接口
@@ -1212,11 +1179,13 @@ STATS_FLUSH_SEC=30             # 下载计数落盘间隔
 
 `ADMIN_ALLOW_CIDR` 是「不加登录体系」前提下的最低成本防护：内网不等于可信网络，办公网和访客 WiFi 常常同网段，任何人打开 `http://IP:8080/admin` 都能删版本。填一个网段即可，下载页不受影响。
 
-**v3.3 修正：这个网段必须同时包含构建机。** 写接口（`POST /api/releases`）受同一个中间件保护，如果 CI 所在网段不在白名单里，4.1 图里那条「构建机 → `POST /api/releases`」会被 403 挡掉，而报错看起来像「服务没起来」。上线前先用 `curl -v` 从构建机打一次 `/admin`，确认返回 200 而不是 403。
+`MAX_UPLOAD_MB` 与 `KEEP_PER_PLATFORM` 的取值由「单包 300–400MB」这个事实推出来（见 4.9）：800 给 400MB 留 2 倍余量；`KEEP_PER_PLATFORM=5` 对应 16GB 存量，30 版会到 96GB，内网机器不一定有那么多盘。
+
+**这个网段必须同时包含构建机。** 写接口（`POST /api/releases`）受同一个中间件保护，如果 CI 所在网段不在白名单里，4.1 图里那条「构建机 → `POST /api/releases`」会被 403 挡掉，而报错看起来像「服务没起来」。上线前先用 `curl -v` 从构建机打一次 `/admin`，确认返回 200 而不是 403。
 
 **IPv4 地址在双栈监听下会变成 `::ffff:10.20.3.51`**。`server.listen(port)` 默认监听 `::`（双栈），此时 `req.socket.remoteAddress` 对 IPv4 客户端返回的是带前缀的形式。如果中间件直接拿这个字符串去匹配 `10.20.0.0/16`，永远匹配不上，管理页会全部 403，而且日志里看到的地址是对的，排查起来很费劲。
 
-**v3.3 修正：统一走「只监听 IPv4」，不再两选一。** 内网全是 IPv4，只在 `0.0.0.0` 上监听，`::ffff:` 前缀根本不会出现，CIDR 匹配逻辑也不用特殊处理：
+**统一走「只监听 IPv4」，不要两选一。** 内网全是 IPv4，只在 `0.0.0.0` 上监听，`::ffff:` 前缀根本不会出现，CIDR 匹配逻辑也不用特殊处理：
 
 ```js
 server.listen(cfg.port, '0.0.0.0')   // 4.0.1 的示例已按此写
@@ -1228,7 +1197,7 @@ server.listen(cfg.port, '0.0.0.0')   // 4.0.1 的示例已按此写
 const addr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
 ```
 
-**v3.3 新增：Docker 端口映射可能让源 IP 失真。** 这是 `ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 共同的前提，必须在上线前实测。
+**Docker 端口映射可能让源 IP 失真。** 这是 `ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 共同的前提，必须在上线前实测。
 
 默认 bridge 网络 + `ports: "8080:8080"` 时，容器内看到的 `remoteAddress` 取决于流量走 iptables DNAT 还是 `docker-proxy`（`userland-proxy` 默认 `true`）。走代理时源地址会变成 bridge 网关（通常 `172.17.0.1`），后果是双杀：
 
@@ -1245,48 +1214,51 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 
 ### 4.9 容量上限与耗时
 
-| 环节 | 上限 | 由什么决定 | 可否调整 |
-|---|---|---|---|
-| 单包上传 | **2048MB**（默认） | `MAX_UPLOAD_MB` + busboy `limits.fileSize` | 改环境变量 |
-| Node 进程内存 | **恒定 50–80MB**，与包大小无关 | `pipeline` 流式 + 32KB 高水位 | 不需要调 |
-| 单包下载 | **无实际限制** | 文件系统 + `int64` | — |
-| 容器本身 | 无限制 | Docker 不限制请求体 | — |
-| 前置 Nginx（若将来加） | 默认 **1MB** | `client_max_body_size` | 必须改 |
+**已确认：单个产物 300–400MB。** 下面所有预算按 **400MB** 取上限计算。
 
-核心结论：**上传是流式的**。`pipeline(part, writeStream)` 边读边写边算哈希，内存占用只有一个流缓冲区。传 10MB 和传 10GB，进程内存都是几十 MB。
+| 环节 | 数值 | 由什么决定 | 说明 |
+|---|---|---|---|
+| 单包上传上限 | **800MB**（`MAX_UPLOAD_MB=800`） | busboy `limits.fileSize` | 给 400MB 留 2 倍余量，超限返回 413 |
+| 单版本占用 | **3.2GB**（400MB × 8 组合） | 产物大小 × 平台数 | 一次齐套发版就是这个量 |
+| 单次空间预检 | **440MB**（1.1 × 400MB） | `freeBytes` + 预留额度 | 见 4.5 的 `tryReserve` |
+| 8 并发预留峰值 | **3.5GB** | 440MB × 8 | 一次性传 8 个包时的额度占用 |
+| Node 进程内存 | **恒定 50–80MB**，与包大小无关 | `pipeline` 流式 + 32KB 高水位 | 不需要调 |
+| 单包下载 | 无实际限制 | 文件系统 | — |
+| 前置 Nginx（若将来加） | 默认 **1MB** | `client_max_body_size` | 必须改，否则 413 |
+
+核心结论：**上传是流式的**。`pipeline(part, writeStream)` 边读边写边算哈希，内存占用只有一个流缓冲区。传 10MB 和传 400MB，进程内存都是几十 MB——400MB 这个量级对内存没有任何要求。
 
 两个容易忽略的细节：
 
-- `Content-Length` 算的是整个请求体，含 multipart 边界与表单字段，**实际可用文件大小略小于 `MAX_UPLOAD_MB`**。别把上限卡在正好等于业务最大包。
+- `Content-Length` 算的是整个请求体，含 multipart 边界与表单字段，**实际可用文件大小略小于 `MAX_UPLOAD_MB`**。800MB 的限额对应实际文件约 800MB 减去几 KB 的表单开销，对 400MB 的包毫无压力。
 - 空间检查按 `剩余 < 1.1 × 包大小` 拒绝。系数是 1.1 而不是 2：`rename` 只改目录项、不复制数据，峰值就是一份临时文件。多留的一点余量是给目录项和系统日志的。
 
 不同目标单包大小的建议：
 
 | 目标单包 | 需要改什么 | 风险 |
 |---|---|---|
-| ≤ 500MB | 不用改 | 无 |
-| 500MB – 2GB | 默认配置即可 | 上传耗时几十秒，正常 |
-| 2 – 5GB | 调高 `MAX_UPLOAD_MB` | 网页上传在部分浏览器不稳定，改用 curl |
+| **300–400MB（当前）** | 默认配置即可，`MAX_UPLOAD_MB=800` | 无 |
+| 500MB – 1GB | 调高 `MAX_UPLOAD_MB` 到 2048 | 上传耗时几十秒，正常 |
+| 1 – 5GB | 调高上限 + 考虑改 curl 上传 | 网页上传在部分浏览器不稳定 |
 | > 5GB | 改配置 + 上分片上传（tus） | 整包上传不可靠，属于另一个工程量 |
 
 内网传输耗时：
 
-| 单包 | 千兆（≈110MB/s） | 百兆（≈11MB/s） | 无线（≈35MB/s） |
-|---|---|---|---|
-| 50MB | 0.5 秒 | 5 秒 | 1.5 秒 |
-| 200MB | 2 秒 | 18 秒 | 6 秒 |
-| 500MB | 5 秒 | 45 秒 | 14 秒 |
-| 2GB | 20 秒 | 3 分钟 | 1 分钟 |
+| 单包 | 千兆（≈110MB/s） | 百兆（≈11MB/s） | 无线（≈35MB/s） | 2Mbps 限速链路 |
+|---|---|---|---|---|
+| 300MB | 3 秒 | 27 秒 | 9 秒 | 约 20 分钟 |
+| **400MB（当前）** | **4 秒** | **36 秒** | **11 秒** | **约 27 分钟** |
+
+千兆内网 4 秒，百兆 36 秒，网页上传体验没有问题。**最后那列才是 `requestTimeout = 0` 仍然必须设的理由**——跨网段或限速环境下 400MB 要跑近半小时，Node 默认的 300 秒必被 408 掐断。
 
 **真正先撞墙的是总容量**：
 
-| 单包大小 | 单版本（8 平台） | 保留 30 版本 |
-|---|---|---|
-| 100MB | 0.8GB | 24GB |
-| 500MB | 4GB | 120GB |
-| 2GB | 16GB | **480GB** |
+| 单包 | 单版本（8 组合） | 保留 5 版 | 保留 10 版 | 保留 30 版 |
+|---|---|---|---|---|
+| 300MB | 2.4GB | 12GB | 24GB | 72GB |
+| **400MB（当前）** | **3.2GB** | **16GB** | **32GB** | **96GB** |
 
-所以 `MAX_UPLOAD_MB` 该设多少，取决于磁盘预算，不是技术偏好。
+所以 `MAX_UPLOAD_MB` 和 `KEEP_PER_PLATFORM` 该设多少，取决于磁盘预算，不是技术偏好。按 400MB 定档：**`KEEP_PER_PLATFORM=5` → 16GB 存量**，加 3.5GB 并发峰值与孤儿、临时文件，**100GB 数据盘足够宽裕**；如果只有 60GB 的根分区，把 `KEEP_PER_PLATFORM` 降到 3（约 9.6GB）。
 
 ---
 
@@ -1298,8 +1270,8 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 |---|---|
 | 误删版本 | 删除必须输入版本号；默认只提供「撤回」，物理删除是二级操作 |
 | 误覆盖版本 | 已从机制上消除：版本号严格不可变，同版本一律 409（`file_missing` 记录例外） |
-| **删除后重传击穿不可变**（v3.3） | 删除改为墓碑：`status='deleted'` 保留记录，查重照样 409。否则"删了再传"等于给同一个 URL 换了内容，`immutable` 缓存和版本追溯同时失效 |
-| **失败路径的 promise 泄漏**（v3.3） | 上传中断时 `tasks` 无人消费，pipeline 的 rejection 会变成未捕获异常直接杀进程。所有异步任务当场挂 `.catch`，`abort()` 里用 `Promise.allSettled` 收尾 |
+| **删除后重传击穿不可变** | 删除改为墓碑：`status='deleted'` 保留记录，查重照样 409。否则"删了再传"等于给同一个 URL 换了内容，`immutable` 缓存和版本追溯同时失效 |
+| **失败路径的 promise 泄漏** | 上传中断时 `tasks` 无人消费，pipeline 的 rejection 会变成未捕获异常直接杀进程。所有异步任务当场挂 `.catch`，`abort()` 里用 `Promise.allSettled` 收尾 |
 | 磁盘写满 | 上传前检查剩余空间（1.1 倍）；管理页顶部常驻显示；`/healthz` 写盘探针失败即标 unhealthy |
 | 路径穿越 | `platform`/`arch` 白名单 + 版本号正则 + 磁盘名程序生成，三重挡 |
 | JSON 损坏 | 启动三态判断；语法错误拒绝启动，绝不拿空数据覆盖 |
@@ -1315,7 +1287,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 | `docker stop` 砍断上传 | SIGTERM 优雅退出：停新连接 → 等 inflight → flush → 退出；`stop_grace_period: 45s` |
 | `/admin` 被任意人访问 | `ADMIN_ALLOW_CIDR` 限定来源网段，**构建机网段必须包含在内** |
 | 双栈下 CIDR 永不匹配 | `remoteAddress` 可能是 `::ffff:10.20.3.51`，剥前缀或只监听 `0.0.0.0` |
-| **Docker 端口映射改写源 IP**（v3.3） | bridge 模式下容器看到的可能是网关地址，CIDR 与 `uploaded_ip` 同时失真。用 `network_mode: host`，上线前按 4.8 实测 |
+| **Docker 端口映射改写源 IP** | bridge 模式下容器看到的可能是网关地址，CIDR 与 `uploaded_ip` 同时失真。用 `network_mode: host`，上线前按 4.8 实测 |
 | 服务挂了 | Docker `restart: unless-stopped` + `HEALTHCHECK` |
 | 容器重建丢数据 | 数据全在宿主机挂载目录，容器无状态 |
 | 谁传的说不清 | `uploaded_ip` + `uploaded_at` 记录在案。**前提是源 IP 真实**，见上一条 |
@@ -1392,7 +1364,7 @@ ENV NODE_ENV=production \
     TZ=Asia/Shanghai \
     PORT=8080 \
     DATA_DIR=/data \
-    MAX_UPLOAD_MB=2048
+    MAX_UPLOAD_MB=800
 
 RUN mkdir -p /data && chown -R node:node /data
 USER node
@@ -1428,13 +1400,13 @@ services:
     container_name: online-exe
     restart: unless-stopped
     stop_grace_period: 45s        # 必须大于 shutdown 里等 inflight 的 30s
-    # v3.3 修正：改用宿主网络，容器内 remoteAddress 才是真实客户端 IP。
+    # 宿主网络：容器内 remoteAddress 才是真实客户端 IP。
     # host 模式下 `ports` 映射无效（写了也不生效），端口由应用自己监听 PORT=8080
     network_mode: host
     environment:
       TZ: Asia/Shanghai
-      MAX_UPLOAD_MB: "2048"
-      KEEP_PER_PLATFORM: "10"
+      MAX_UPLOAD_MB: "800"
+      KEEP_PER_PLATFORM: "5"
       ADMIN_ALLOW_CIDR: "10.20.0.0/16"
       NODE_ENV: production
     volumes:
@@ -1453,7 +1425,7 @@ services:
 
 `IMAGE_TAG` 走变量而不是写死：升级时改 `.env` 里的 `IMAGE_TAG=1.0.1`，`docker compose up -d` 完成替换。
 
-**v3.3 修正：为什么改 `network_mode: host`。** 见 4.8 的说明——默认 bridge + `ports` 映射在部分环境下会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 双双失真，而这俩恰好是本方案仅有的两道"谁能操作/谁传的"防线。
+**为什么用 `network_mode: host`。** 见 4.8 的说明——默认 bridge + `ports` 映射在部分环境下会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 双双失真，而这俩恰好是本方案仅有的两道"谁能操作/谁传的"防线。
 
 host 模式的代价与对策：
 
@@ -1476,15 +1448,15 @@ host 模式的代价与对策：
 |---|---|---|---|
 | 1 | **数据没挂卷** | `docker rm` 后版本记录归零 | 必须 `-v /srv/online_exe/data:/data` |
 | 2 | **文件权限** | 上传报 `EACCES`，宿主机改不动文件 | 容器内 `node`（uid 1000），宿主机目录 `chown -R 1000:1000` |
-| 3 | **大文件被掐断** | 传 2GB 上传到一半连接重置 | `server.requestTimeout = 0`（Node 默认 300 秒） |
+| 3 | **大文件被掐断** | 传 400MB 上传到一半连接重置 | `server.requestTimeout = 0`（Node 默认 300 秒） |
 | 4 | **大文件被 413** | 若前置 Nginx，直接 413 | 宿主机 Nginx 的 `client_max_body_size` 默认 1MB |
 | 5 | **时区差 8 小时** | 页面时间和日志全是 UTC | `TZ=Asia/Shanghai` + 镜像内装 tzdata |
 | 6 | **重启不自动** | 宿主机重启后服务静默消失 | `restart: unless-stopped` |
 | 7 | **`docker stop` 砍断上传** | 发版时重启服务，正在传的包全废、用户白传 | SIGTERM 优雅退出 + `stop_grace_period: 45s`（默认只等 10 秒） |
 | 8 | **双栈监听导致 CIDR 全 403** | 管理页打不开，日志里的 IP 看着又是对的 | `remoteAddress` 是 `::ffff:10.20.3.51`，剥前缀或只监听 `0.0.0.0` |
-| 9 | **端口映射改写源 IP**（v3.3 新增） | `ADMIN_ALLOW_CIDR` 全 403，或 `uploaded_ip` 全是同一个地址 | 走 `network_mode: host`；坚持 bridge 就先实测 `remoteAddress` |
+| 9 | **端口映射改写源 IP** | `ADMIN_ALLOW_CIDR` 全 403，或 `uploaded_ip` 全是同一个地址 | 走 `network_mode: host`；坚持 bridge 就先实测 `remoteAddress` |
 
-第 3、8、9 条是 Node 版特有的，也是最隐蔽的三个：一个只在传大文件时出现，两个只在配了 `ADMIN_ALLOW_CIDR` 之后出现，本地小规模测试都碰不到。
+第 3、8、9 条最隐蔽：一个只在传大文件时出现，两个只在配了 `ADMIN_ALLOW_CIDR` 之后出现，本地小规模测试都碰不到。
 
 第 9 条最坑的地方在于**它会伪装成第 8 条**：同样表现为"管理页全 403"，但改监听地址没用，因为问题在 Docker 网络层，不在 Node。先看 `uploaded_ip` 记录的是不是一堆 `172.17.0.x`，能一秒区分。
 
@@ -1496,10 +1468,11 @@ host 模式的代价与对策：
 
 | 项 | 估算 |
 |---|---|
-| 单包大小 | 50–200MB |
-| 单版本 8 平台 | 约 0.8GB |
-| 保留 30 个版本 | 约 24GB |
-| 建议磁盘预留 | **60GB 以上，单独挂数据盘** |
+| 单包大小 | **300–400MB** |
+| 单版本 8 组合 | **约 3.2GB** |
+| 保留 5 个版本（`KEEP_PER_PLATFORM=5`） | 约 16GB |
+| 8 并发上传预留峰值 | 约 3.5GB |
+| 建议磁盘预留 | **100GB 数据盘**；只有 60GB 根分区时把 KEEP 降到 3 |
 
 ### 6.7 裸机部署（备选）
 
@@ -1513,7 +1486,7 @@ host 模式的代价与对策：
 
 ### 7.1 为什么改成按页面切
 
-v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么出去」。纸面上干净，真跑起来有三个坑：
+按文件切（A 管「数据怎么进来」，B 管「数据怎么出去」）纸面上干净，真跑起来有三个坑：
 
 | # | 症状 | 后果 |
 |---|---|---|
@@ -1566,9 +1539,9 @@ v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么�
 | 配置项 | `src/config.js` | 环境变量结构定死（含 `ADMIN_ALLOW_CIDR`） |
 | 假数据 | `fixtures/releases.sample.json` | 8 组合各 2 个版本，B 在 A 的底座可用前靠它对页面 |
 
-**v3.4 修正：`catalog` 在阶段 0 就用 fixture 桩实现。** 这是按页面切能不能并行的开关——`has/find/latest/list` 先读 `fixtures/releases.sample.json`；`add/setStatus` 先写内存数组 + 打日志（不落盘、不校验）。B 的上传流程能整条跑通，A 之后把实现换成真 JSON 落盘 + 原子写，调用方一行不改。
+**`catalog` 在阶段 0 就用 fixture 桩实现。** 这是按页面切能不能并行的开关——`has/find/latest/list` 先读 `fixtures/releases.sample.json`；`add/setStatus` 先写内存数组 + 打日志（不落盘、不校验）。B 的上传流程能整条跑通，A 之后把实现换成真 JSON 落盘 + 原子写，调用方一行不改。
 
-**v3.3 修正：路由表要连方法一起冻结，不能只写路径。** v3.2 只规定了「有撤回/恢复功能」，没有给路由，A 和 B 各写各的就会对不上。冻结为：
+**路由表要连方法一起冻结，不能只写路径。** 只写「有撤回/恢复功能」而不定路由，两人各写各的必然对不上。冻结为：
 
 | 方法 | 路径 | 用途 | 实现 | 阶段 0 |
 |---|---|---|---|---|
@@ -1674,7 +1647,7 @@ v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么�
 
 ### 7.9 验收清单（41 条）
 
-规则：**谁写的代码谁先跑**，跑完再交叉跑一遍对方的（见下面的认领表）。清单本身沿用 v3.3，未改内容。
+规则：**谁写的代码谁先跑**，跑完再交叉跑一遍对方的（见下面的认领表）。
 
 1. **首次启动**：`/data` 为空目录，服务正常起来并生成空的 `releases.json`（不是拒绝启动）
 2. 8 个平台各传一个包，下载页按平台正确分块（Win7 / Win10 为独立区块），每块版本号正确
@@ -1684,14 +1657,14 @@ v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么�
 6. **并发上传同一版本**：两个 curl 同时打同一个 `(platform,arch,version)`，只有一个 201，另一个 409「正在上传」
 7. **并发提交不互相覆盖**：把 `inflight` 超时临时改成 0 秒，两个请求同时提交同一 key，结果只能有一个成功、文件内容与 JSON 记录一致
 8. **并发上传不同平台**：8 个 curl 同时传 8 个平台全部成功，总耗时接近单个包（验证没被串行化）
-9. **2GB 包上传不 OOM**（`docker stats` 观察内存是否恒定在百兆内）
+9. **400MB 包上传不 OOM**（`docker stats` 观察内存是否恒定在百兆内；要压 2GB 需临时把 `MAX_UPLOAD_MB` 调到 2048）
 10. **传输超过 5 分钟不中断**（限速到 1MB/s 传 400MB，验证 `requestTimeout = 0` 生效）
 11. **上传中途 `kill -9` 容器**，重启后 `**/*.tmp` 已清理，`releases.json` 无残留记录
 12. **上传中途 `docker stop`**（不是 `-f`），服务等上传完成或 30 秒超时后才退出，`stats.json` 计数没丢
 13. **手动往 `data/releases/9.9.9/` 塞野文件**，重启后移入 `data/orphan/`，原记录不受影响
 14. **孤儿文件在管理页可见**：状态条显示个数与总大小，点开能看路径、能单个删除
 15. **`file_missing` 记录能重传**：手工删掉某个包文件 → 重启 → 记录被置 `file_missing=true` 且 `status` 保持不变 → 同版本重新上传成功（不返回 409）→ 重传后 `id` 与原来一致、下载计数没归零
-16. **已撤回的版本文件丢失**：先撤回（`yanked`）再删掉包文件 → 重启 → 记录仍是 `yanked` 且 `file_missing=true`，**不能变回 `active`**（v3.3 新增，验状态与文件事实已解耦）
+16. **已撤回的版本文件丢失**：先撤回（`yanked`）再删掉包文件 → 重启 → 记录仍是 `yanked` 且 `file_missing=true`，**不能变回 `active`**（验状态与文件事实已解耦）
 17. **挂载目录改只读**，`/healthz` 返回 503，`docker ps` 显示 unhealthy
 18. 下载中断后续传成功（浏览器暂停/恢复，或 `curl -C -`）
 19. **同一 URL 二次下载**返回 304 或命中缓存，服务端不再传输正文
@@ -1712,11 +1685,11 @@ v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么�
 34. **一次传两个文件**：`curl -F "file=@a" -F "file=@b"`，返回 400 而不是静默只存第一个
 35. **管理页 CIDR 生效**：把 `ADMIN_ALLOW_CIDR` 改成不包含本机测试机的网段，管理页 403、下载页仍可访问；再改回来确认不是 `::ffff:` 前缀导致的假 403
 
-**v3.3 新增的 6 条**（对应本轮修掉的硬伤，必须全部过）：
+**下面 6 条是硬伤用例，必须全部过**：
 
-36. **上传中途客户端断开，服务不退出**：`curl --limit-rate 1M` 传 2GB，传到一半 `kill` 掉 curl，再 `curl -v http://IP:8080/healthz` 必须 200；`docker logs` 里不能出现 `UnhandledPromiseRejection` / `uncaughtException`。**连做 10 次**，容器 `RestartCount` 必须还是 0。这条不通过就别上线
+36. **上传中途客户端断开，服务不退出**：`curl --limit-rate 1M` 传 400MB，传到一半 `kill` 掉 curl，再 `curl -v http://IP:8080/healthz` 必须 200；`docker logs` 里不能出现 `UnhandledPromiseRejection` / `uncaughtException`。**连做 10 次**，容器 `RestartCount` 必须还是 0。这条不通过就别上线
 37. **删除后同版本重传**：删除 `1.3.0/windows10-x64`，再传同一个版本号，必须 409；管理页「已删除」筛选里能看到墓碑记录
-38. **8 个并发大包的空间预检**：把 `/data` 缩到只剩 20GB（临时挂一个小盘或 `--storage-opt` 限制），同时开 8 个 2GB 上传，预期是「部分 507、部分成功」，**不能出现全部通过、最后集体 ENOSPC，也不能让服务崩**
+38. **8 个并发大包的空间预检**：把 `/data` 缩到只剩 2GB（临时挂一个小盘或 `--storage-opt` 限制），同时开 8 个 400MB 上传（合计 3.2GB，预留口径 3.5GB），预期是「部分 507、部分成功」，**不能出现全部通过、最后集体 ENOSPC，也不能让服务崩**
 39. **源 IP 真实性**：按 4.8 的命令从另一台内网机器访问，`remoteAddress` 必须是那台机器的真实 IP；同时确认新上传记录的 `uploaded_ip` 与之一致
 40. **续传不重复计数**：`curl -C -` 分三次续传同一个包，`stats.json` 里这个 id 的计数只 +1（若中途换过文件则允许 +2）
 41. **构建机上传不被 CIDR 挡**：从 CI 机器 `curl -X POST` 传一个小文件，必须 201，不能 403
@@ -1762,108 +1735,14 @@ v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么�
 
 ## 9. 遗留待定
 
-1. **单包大概多大？** 决定 `MAX_UPLOAD_MB` 默认值和磁盘预留量。
+1. **单包大小：已确认 300–400MB。** 据此定档 `MAX_UPLOAD_MB=800`、`KEEP_PER_PLATFORM=5`、数据盘 100GB，预算推导见 4.9。
 2. **内网有多少人要下载？** 十几个人，Express 直出完全够；上百人同时拉，再考虑前置 Nginx 托管静态文件。
 3. **服务端口 8080 是否被占？** 开工前确认。
 4. **内网 Docker / Compose 版本？** compose 用的是 v2 语法，需要 Docker Compose v2。
-5. **宿主机有没有独立数据盘挂 `/srv/online_exe/data`？** 没有的话至少确认根分区剩余 60GB。
+5. **宿主机有没有独立数据盘挂 `/srv/online_exe/data`？** 单包 400MB、保留 5 版需要约 16GB，加并发峰值与余量按 **100GB** 规划；只有根分区 60GB 时把 `KEEP_PER_PLATFORM` 降到 3。
 6. **两人各自能不能独立写服务端？** 能 → 按 7.3 页面竖切；有一人只会前端 → 退到 7.10 的横切方案。
 7. **管理页的来源网段是什么？** 填 `ADMIN_ALLOW_CIDR`，填错管理页直接 403；**构建机网段也要算进去**，否则 CI 上传 403。
 8. **构建机能不能联网跑 `npm ci`？** 如果构建机也断网，需要提前把 `node_modules` 打包成离线产物，或搭一个内网 npm 源。
-9. **能不能用 `network_mode: host`？**（v3.3 新增）运维如果有统一的 Docker 网络规范，需要先确认。不能用的话，必须按 4.8 实测源 IP，再决定 `ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 还有没有意义。
-10. **删除的版本记录能不能长期保留？**（v3.3 新增）墓碑记录只占几百字节，几百条也就几十 KB。除非有合规要求必须真删，默认永久保留。
+9. **能不能用 `network_mode: host`？** 运维如果有统一的 Docker 网络规范，需要先确认。不能用的话，必须按 4.8 实测源 IP，再决定 `ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 还有没有意义。
+10. **删除的版本记录能不能长期保留？** 墓碑记录只占几百字节，几百条也就几十 KB。除非有合规要求必须真删，默认永久保留。
 
----
-
-## 附录：审核修订记录（v3.2 → v3.4）
-
-v3.2 → v3.3 部分先用 Node.js / busboy / send 的官方源码逐条核验了方案里的事实性断言，再交叉检查内部一致性。下表是全部改动，按严重度排序。**E 节是 v3.4 的分工变更**，只动第 7 节与支撑它的目录结构。
-
-### A. 硬伤（不改会出事）
-
-| # | 位置 | v3.2 的问题 | v3.3 的处理 |
-|---|---|---|---|
-| 1 | 4.5 busboy 代码 | `tasks` 里的 promise 只在 `commit()` 被消费；`abort()` 路径永不执行 `commit()`，pipeline 的 rejection 变成未捕获异常。Node 官方文档：`--unhandled-rejections` 默认 `throw`，未注册钩子即「作为未捕获异常抛出」→ **进程退出**。一个断网的上传者能打挂整个服务 | 任务当场 `.catch` 收进 `taskErrors`；`abort()` 改为 `await Promise.allSettled(tasks)` 后再 `cleanup()`；`commit()` 检查 `taskErrors`。验收清单新增第 36 条 |
-| 2 | 4.4 删除规则 | 物理删除记录 → 删掉再传同版本号，内容换了但 URL 没换，击穿 4.6 的 `immutable` 和「版本号不可变」底线 | 改为墓碑：`status='deleted'` 保留记录、只删文件；查重照样 409；下载一律 404 |
-| 3 | 4.7 上传区 | 表单字段仍列「渠道、强制更新」，`sessionStorage` 仍存「渠道」，与 4.3 已删除这两个字段直接矛盾 | 字段收敛为「版本号/平台/架构/更新说明」；渠道改为由 semver 派生的只读标签 |
-| 4 | 4.4 版本格式 | 允许 `v` 前缀但没归一化，`v1.3.0` 与 `1.3.0` 会成为两条记录、两个目录 | 入口 `replace(/^v/i,'')`，全链路用归一化值 |
-| 5 | 4.5 空间预检 | 单次预检是 TOCTOU，8 个并发各自看到「剩余够」，同时写爆磁盘；与验收第 8 条冲突 | 新增 `reservedBytes` 累加器 + `tryReserve`/`releaseReserve`，所有释放点显式扣回 |
-| 6 | 6.4 部署 | 默认 bridge + `ports` 在部分环境下把源 IP 换成网关，`ADMIN_ALLOW_CIDR` 与 `uploaded_ip` 同时失真，且会被误判成 `::ffff:` 问题 | 改 `network_mode: host`；4.8 补实测命令；6.5 新增第 9 条坑 |
-
-### B. 事实性错误（论断与源码不符）
-
-| # | 位置 | v3.2 的问题 | v3.3 的处理 |
-|---|---|---|---|
-| 7 | 4.0.1 超时方向 | 「`headersTimeout` 必须大于 `keepAliveTimeout`，否则 Node 告警 + ECONNRESET」——`lib/_http_server.js` 里没有这个比较。真实约束是 `headersTimeout <= requestTimeout`（两者都 >0 时），违反抛 `ERR_OUT_OF_RANGE` | 表格与说明全部重写；`headersTimeout` 回到默认 60000；补「keep-alive 实际超时 = `keepAliveTimeout` + `keepAliveTimeoutBuffer`(默认 1000)」 |
-| 8 | 4.6 路由 | 「path-to-regexp 对 `/:platform-:arch` 的解析在不同版本间有过变化」——v8 文档明确支持，参数名遇到非标识符字符即终止 | 保留 `:combo` 结论，但把理由换成「校验集中在一处」，并删掉错误论断 |
-| 9 | 4.7 管理页 | 「`<head>` 里检测到 IE 后中止渲染」——服务端已渲染完成，没有「中止」这个动作 | 改为内联脚本加 `ie-blocked` 类 + CSS 隐藏主体，给出完整代码 |
-| 10 | 3.3 表 | 「`res.sendFile` 一行，但自定义 ETag 要关掉默认值」——歧义：`send` 并不会覆盖已有 ETag，要关的是 `Last-Modified` | 改为「`send` 会沿用已有 ETag，但默认还会设 `Last-Modified`，必须显式关掉」 |
-
-### C. 内部矛盾与遗漏
-
-| # | 位置 | v3.2 的问题 | v3.3 的处理 |
-|---|---|---|---|
-| 11 | 4.0.2 + 4.3 + 4.7 | 对账把文件丢失写成 `status='broken'`，会覆盖 `yanked`，撤回状态丢失 | `status` 与文件事实解耦：新增 `file_missing` 布尔，`status` 收敛为 `active/yanked/deleted` |
-| 12 | 4.4 broken 重传 | 「id 重新生成，stats 计数保留」自相矛盾（stats 的 key 就是 id） | 改为沿用原 `id`，计数天然连续 |
-| 13 | 4.5 commit() | `res.json(toReleaseDto(rec))` 引用的 `rec` 定义在 `enqueueWrite` 回调内部，作用域外 → 运行时 `ReferenceError` | 改为 `const rec = await enqueueWrite(...)`，内层变量改名 `record` |
-| 14 | 4.6 计数 | 「304 也 +1」在 `immutable` 下不可能发生（浏览器不发请求）；且断点续传的多个 Range 请求会重复计数 | 改成「无 `Range` 或 `bytes=0-` 才 +1」；把计数口径写清楚，不再假装能统计缓存命中 |
-| 15 | 4.7 摘要 | 摘要按 4 个 OS 展示，但 `latest()` 是 8 个组合，arch 间版本不一致时无解 | 定死聚合规则：取该 OS 下最高版本 + `*` 标注 + 小字列各 arch 版本 |
-| 16 | 4.7 清理建议 | 「每个平台除最近 10 个版本」——「平台」在文中既指 4 个 OS 又指 8 个组合 | 统一为 `platform-arch` 组合 |
-| 17 | 4.6 combo 解析 | `const [platform, arch] = combo.split('-')` 对 `windows10-x64-extra` 静默取前两段并命中记录 | 显式判 `parts.length !== 2` + 白名单，否则 404 |
-| 18 | 7.2 路由表 | 撤回/恢复只有功能描述，没有路由定死，两人实现必然对不上 | 补完整路由表（含 `yank` / `unyank` / `orphans`） |
-| 19 | 4.0.4 | `persist.flush()` 未定义 | 明确实现为 `return writeQueue` |
-| 20 | 4.3 落盘 | 目录 `fsync` 在非 Linux 文件系统会抛 `EACCES/EINVAL`，会让整个写操作判失败 | 包 try/catch，只吞这几类错误码 |
-| 21 | 4.7 静态资源 | `express.static('public')` 依赖 cwd，ESM 下没有 `__dirname` | 统一用 `path.join(import.meta.dirname, '..')` |
-| 22 | 4.8 CIDR | 只说了下载页不受影响，没提 CI 上传也被同一个中间件保护 | 补「构建机网段必须包含在白名单内」，验收新增第 41 条 |
-| 23 | 4.3 schema | `schema` 从 2 升到 3，但没写迁移动作 | 补迁移表：`broken` → `active` + `file_missing=true`；JSON 示例同步改为 `"schema": 3` |
-| 24 | 4.0.2 对账 | **改墓碑时发现的耦合点**：墓碑的文件是主动删的，对账会把 `file_missing` 置真，查重条件随即放行，不可变保护被自己绕开 | 对账循环首行 `if (rel.status === 'deleted') continue`，并给出完整循环代码 |
-
-### C-2. 二审（修订完成后回读）新发现
-
-改完从头再读一遍，又挖出四处，都落在实现细节上：
-
-| # | 位置 | 问题 | 处理 |
-|---|---|---|---|
-| 25 | 4.5 busboy 选项 | 监听了 `fieldsLimit`，但 `limits.fields` 默认 `Infinity`，这个事件**永远不会触发**，是死代码 | 显式设 `fields: 10`、`fieldSize: 64 * 1024` |
-| 26 | 4.5 commit() | 请求里没有 `file` part 时 `tasks` 为空，`commit()` 继续往下走，`fs.rename(undefined, ...)` 会以 500 收场，前端看到「服务器错误」而不是「你没选文件」 | 开头加 `if (tasks.length === 0) throw new Error('NO_FILE')` |
-| 27 | 4.5 错误码 | 只有 `DUPLICATE` 有专属状态码，`FILE_TOO_LARGE` 掉进 500 | 改成映射对象 `{ DUPLICATE: 409, NO_FILE: 400, FILE_TOO_LARGE: 413 }`，默认 500 |
-| 28 | 4.5 额度释放 | 新增的 `reserve` 逻辑本来会让 `cleanup()` 和 `commit().finally` 双释放 | 明确「额度只在 abort 的异步块和 commit 的 finally 里还」，`cleanup()` 不碰 |
-
-### D. 核验通过、未改动的部分
-
-这些断言对照官方源码确认无误，实施时可以直接照做：
-
-| 断言 | 核验依据 |
-|---|---|
-| `requestTimeout` 默认 300000、`headersTimeout` 默认 60000、`keepAliveTimeout` 默认 5000 | `lib/_http_server.js` `storeHTTPOptions()` |
-| `requestTimeout = 0` 是禁用大文件上传超时的正确做法 | busboy README 首段也专门警告过这一点 |
-| `send` 库「已有 ETag 就不覆盖」，手动设 ETag 可行 | `SendStream.prototype.setHeader` 里的 `!res.getHeader('ETag')` |
-| `send` 原生支持 Range / If-Range / 304 | `isConditionalGET` → `isCachable && isFresh` → `notModified()` |
-| busboy `defParamCharset` 默认 `latin1` | 官方 README 参数表 |
-| `limit` 事件在 file stream 上，不在 Busboy 实例上 | 同上 |
-| `bb.on('close')` ≠ 文件写完，必须 await 任务 | 事件语义：close 只表示请求体解析完毕 |
-| `fs.statfs` 用 `bavail * bsize` | 容器以非 root 运行，`bavail` 才是可用块 |
-| `node:24-alpine` 内置 uid 1000 的 `node` 用户 | 官方镜像文档 |
-| `rename` 只改目录项、峰值一份，系数 1.1 合理 | 文件系统语义 |
-| EJS 无内置 layout | 依赖表里只有 `express`/`busboy`/`ejs` |
-| `Content-Disposition` 需要 ASCII 回退给 IE11 | RFC 6266 / IE11 行为 |
-
-### E. v3.4：分工改按页面竖切
-
-技术设计一行没改，只重排了分工。改之前的问题和改之后的代价都记在这里，免得下次又想改回去。
-
-| # | 位置 | v3.3 的问题 | v3.4 的处理 |
-|---|---|---|---|
-| 1 | 第 7 节 | 按文件切（A 数据进来 / B 数据出去），一个页面被两人共有，出问题没人认 | 改为按页面竖切：A 拿下载页全栈，B 拿管理页全栈 |
-| 2 | 4.2 目录 | `routes/pages.js` 一个文件装两个页面的渲染函数 | 拆成 `routes/pages/download.js` + `pages/admin.js` |
-| 3 | 4.2 / 4.7 | `public/style.css` 两人都往里加样式，冲突必现 | 拆成 `base.css`（共享·冻结）+ `download.css`（A）+ `admin.css`（B） |
-| 4 | 7.4 | 契约冻结只定签名，没解决「A 不写完 B 没法动」 | `catalog` 先用 `fixtures/releases.sample.json` 做桩，读写都能跑通 |
-| 5 | 7.5 | 没有规定两页之间的数据边界 | 硬规则：`pages/download.js` 不许 import `dto.js`；下载页自己组装模板变量 |
-| 6 | 7.9 | 41 条验收清单没写谁主责 | 按页面认领：A 17 条 / B 17 条 / 共同 7 条，再交叉跑一遍 |
-| 7 | 8 | 里程碑没挂人，M2/M3 卡住不知道找谁 | M2 挂 A、M3 挂 B，M1/M4 各一半 |
-
-代价（接受，不打算改回去）：
-
-- **共享底座成为串行依赖**。A 的 `catalog` 是 B 的入口，桩实现是唯一解药；如果桩做不出来，这套分工就退回按文件切。
-- **工作量 1380 : 1320，看着平，但 A 的 860 行底座是硬骨头**（原子写、三态加载、对账），B 的 920 行管理页里有一半是模板和交互，写起来快。真跑起来 A 大概率是先落后、后追上。
-- **单页所有权带来「我说了算」风险**。用交叉评审（7.8）和 7.9 的交叉验收压住，但压不住「两人都不懂 IE11」这种能力问题。
