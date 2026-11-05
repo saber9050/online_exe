@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="<%= page === 'admin' ? 'js-ok' : 'download-page' %>">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<% if (page === 'admin') { %>
+<script>if (!window.Promise || !window.fetch) { document.documentElement.className = 'ie-blocked'; }</script>
+<% } %>
+<title><%= title %> · <%= cfg.appName %></title>
+<link rel="stylesheet" href="/base.css">
+<link rel="stylesheet" href="/<%= pageCss %>.css">
+</head>
+<body>
+<div class="ie-tip">请用 Chrome / Edge 打开本页</div>
+<header class="topnav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark">&#9670;</span>
+      <span class="brand-name"><%= cfg.appName %></span>
+      <span class="brand-sub"><%= cfg.appDescription %></span>
+    </a>
+    <% if (page === 'admin') { %>
+    <nav class="nav-links">
+      <a href="/">客户端下载</a>
+      <a href="/admin" class="active">发版管理</a>
+    </nav>
+    <% } %>
+  </div>
+</header>

@@ -1,0 +1,11 @@
+<footer class="site-foot">
+  <div class="wrap foot-inner">
+    <span><%= cfg.appName %> · 内网发版平台</span>
+    <span class="foot-dim">下载统计口径：服务端收到的下载请求</span>
+  </div>
+</footer>
+<% if (typeof pageScript !== 'undefined' && pageScript) { %>
+<script src="/<%= pageScript %>.js"></script>
+<% } %>
+</body>
+</html>
