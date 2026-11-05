@@ -1,8 +1,8 @@
 # 内网客户端发版平台 · 方案设计
 
-> 版本：v3.3（Node.js 全栈 · 三轮审查修订）　日期：2026-11-05　模块名：`online_exe`
+> 版本：v3.4（Node.js 全栈 · 分工改为按页面竖切）　日期：2026-11-05　模块名：`online_exe`
 >
-> 状态：已审核修订（v3.3）。本轮修订逐条对照 Node.js / busboy / send 官方源码验证，改动处正文用 **v3.3 修正** 就地标注，完整清单见文末「附录：审核修订记录」。
+> 状态：v3.3 的技术设计保持不变。v3.4 只动**分工（第 7 节）**及支撑它的目录结构、样式拆分，改动处用 **v3.4 修正** 就地标注。
 
 ## 变更记录
 
@@ -20,6 +20,7 @@
 | v3.1 | 2026-11-05 | **Node 版审查修订**：元数据改走 query string（解决 multipart 字段顺序不确定）；busboy 提交改为 `Promise.all(tasks)`（close 不等于写完）；修正 `headersTimeout`/`keepAliveTimeout` 方向；下载页 Tab 改锚点区块（JS 挂了也能用）；路由改 `:combo`；`aborted` 改 `close`；补 orphan 递归、坏记录 410、静态资源缓存、IE11 兜底 |
 | v3.2 | 2026-11-05 | **二轮审查**：删掉 `channel` 与 `force_update`，唯一键收敛为 `(platform,arch,version)`；空间预检系数 2 → 1.1；JSON 写串行队列 + 提交顺序修正；busboy 补 `defParamCharset`、`filesLimit`/`error` 事件、状态机防重入；`Content-Disposition` 补 ASCII 回退（IE11）；包文件补 fsync；新增优雅退出；修 IPv6-mapped 地址、EJS 布局、broken 重传、orphan 管理入口 |
 | v3.3 | 2026-11-05 | **三轮审查**：修 `tasks` 悬空 promise 导致进程退出（最严重）；删除改为墓碑，堵死「删后重传」击穿不可变；`status` 与文件缺失解耦（新增 `file_missing`）；v 前缀归一化；空间预检加并发额度；超时方向纠错（真实约束是 `headersTimeout <= requestTimeout`）；`commit()` 作用域 bug；broken 重传沿用原 id；部署改 `network_mode: host` 取真实源 IP；清理 4.7 残留的「渠道/强制更新」；补续传计数去重、combo 校验、CI 网段说明 |
+| v3.4 | 2026-11-05 | **分工改为按页面竖切**：第 7 节整体重写（分工原则 / 页面归属 / 页面↔接口接缝 / 工作量账 / 时序 / 验收认领 / 备选），里程碑挂人。为支撑切分动了目录：`routes/pages.js` 拆成 `pages/download.js` + `pages/admin.js`，`public/style.css` 拆成 `base.css` + `download.css` + `admin.css`，新增 `fixtures/`。技术设计不变，附录新增 E 节 |
 
 ---
 
@@ -384,9 +385,11 @@ online_exe/
 │   │   ├── persist.js         # 原子写、三态加载、tmp 清理、对账
 │   │   └── stats.js           # 下载计数（内存累加 + 定时落盘）
 │   ├── routes/
-│   │   ├── index.js           # 路由表
+│   │   ├── index.js           # 路由表（只由 A 改）
 │   │   ├── dto.js             # HTTP 响应结构，与磁盘结构分离
-│   │   ├── pages.js           # 页面渲染
+│   │   ├── pages/
+│   │   │   ├── download.js    # 下载页渲染（组装模板变量，不 import dto.js）
+│   │   │   └── admin.js       # 管理页渲染（参数按 DTO 形状）
 │   │   ├── upload.js          # busboy 流式上传
 │   │   ├── download.js        # sendFile + 自定义 ETag + 计数
 │   │   └── releases.js        # 列表 / 撤回 / 恢复 / 删除
@@ -404,9 +407,13 @@ online_exe/
 │   ├── download.ejs           # 下载页（只读）
 │   └── admin.ejs              # 管理页（上传 + 版本列表）
 ├── public/                    # 静态资源，随镜像走
-│   ├── style.css
+│   ├── base.css               # 共享：重置 + 字体 + 顶部导航（冻结）
+│   ├── download.css           # 下载页样式
+│   ├── admin.css              # 管理页样式
 │   ├── download.js
 │   └── admin.js
+├── fixtures/
+│   └── releases.sample.json   # 8 组合各 2 个版本，页面开发期的假数据
 ├── data/                      # 运行时挂载，.dockerignore 排除
 │   ├── releases.json
 │   ├── releases.json.bak
@@ -418,6 +425,10 @@ online_exe/
 ├── .dockerignore
 └── docs/
 ```
+
+**v3.4 修正：`pages.js` 拆成 `pages/download.js` 和 `pages/admin.js`。** 一个 `pages.js` 里塞两个页面的渲染函数，两人按页面分工时必然在同一文件里各改一段，冲突概率从 0 变成每天一次。拆开后 `routes/pages/` 下的文件与页面一一对应，谁改谁的。
+
+**v3.4 修正：`style.css` 拆成三个。** 下载页和管理页的样式本来就没有交集（一个是平铺区块 + 表格，一个是表单 + 状态条），合在一个文件里只是图省事。`base.css` 放两者都用的重置、字体、顶部导航，阶段 0 写完冻结；`download.css` 给 A、`admin.css` 给 B。这条是按页面分工的前置条件，不拆就没法切干净。
 
 **为什么磁盘结构和 HTTP DTO 分开**：`catalog/types.js` 是磁盘格式，`routes/dto.js` 是响应格式。混用的后果是——API 想加个 `download_url`，结果写进了 `releases.json`；想把 `uploaded_ip` 从响应里去掉，历史记录也跟着少字段。分开的代价只是一个二十行的映射函数。
 
@@ -1043,7 +1054,7 @@ HTML + CSS + 原生 JavaScript **ES5**，无框架、无 TypeScript、无构建�
 | 层 | 用什么 | 说明 |
 |---|---|---|
 | 结构 | EJS 模板 | 服务端渲染，列表在模板里循环输出 |
-| 样式 | 手写 CSS（约 200 行） | 不用 CSS 变量、不用 Grid |
+| 样式 | 手写 CSS（约 260 行，拆三份：`base.css` 60 / `download.css` 90 / `admin.css` 110） | 不用 CSS 变量、不用 Grid |
 | **下载页 JS** | **原生 ES5 + `XMLHttpRequest`**（约 60 行） | 必须兼容 IE11：不能有 `const`/箭头函数/`fetch`/`Promise` |
 | **管理页 JS** | **现代 JS（ES2020+），`fetch` 可用**（约 60 行） | 只在 Chrome/Edge 跑，IE 打开会显示兜底提示 |
 | 静态资源 | `express.static(...)` | 本地文件，不走 CDN；**不要设长缓存** |
@@ -1072,7 +1083,7 @@ views/
 
 两页各 include 一次，十行代码的事，不值得为它引一个依赖。
 
-**静态资源不要设 `immutable`**。`/dl/` 下的包有版本号做指纹，可以缓存一年；但 `style.css`、`admin.js` 没有指纹，设长了改版后用户会一直拿旧文件，表现是「改了样式但没生效」。让它们走默认的 `ETag + 协商缓存`（304）就够了。真要长缓存，得给文件名加内容哈希，那是另一个工程量。
+**静态资源不要设 `immutable`**。`/dl/` 下的包有版本号做指纹，可以缓存一年；但 `base.css`、`download.css`、`admin.js` 没有指纹，设长了改版后用户会一直拿旧文件，表现是「改了样式但没生效」。让它们走默认的 `ETag + 协商缓存`（304）就够了。真要长缓存，得给文件名加内容哈希，那是另一个工程量。
 
 **版本历史表格默认只渲染最近 20 条**，其余折叠展开。IE11 渲染几百行 `<tr>` 会明显卡顿，而这个页面是给人「找某个旧版本」用的，全量渲染没有意义。
 
@@ -1498,42 +1509,79 @@ host 模式的代价与对策：
 
 ---
 
-## 7. 两人开发分工
+## 7. 两人开发分工（按页面竖切）
 
-### 7.1 分工原则
+### 7.1 为什么改成按页面切
 
-1. **按文件切，不按前后端层切**。前端一共 540 行模板样式，一人包前端会闲死，一人包后端会累死。
-2. **公共契约第一天冻结**。路由表、数据结构、接口签名定死之后，谁都不许单方面改。
-3. **每个人的文件集合不重叠**，git 冲突概率压到接近 0。
+v3.3 是按文件切的：A 管「数据怎么进来」，B 管「数据怎么出去」。纸面上干净，真跑起来有三个坑：
 
-### 7.2 阶段 0：契约冻结（两人一起，半天）
+| # | 症状 | 后果 |
+|---|---|---|
+| 1 | **页面没有主人**。下载页模板是 B 的、数据是 A 的 `catalog` 出的、`/dl` 又是 B 的 | IE11 白屏时两人对看，谁都不觉得这段归自己 |
+| 2 | **联调期互相堵**。A 的上传没写完，B 没有真数据可下；B 的模板没定，A 不知道模板要哪些字段 | 并行度虚高，实际有一半时间在等 |
+| 3 | **验收没法认领**。41 条用例里有一半横跨两人 | 出问题先吵「这不是我这段」 |
+
+改成**按页面竖切**：一个页面一个人，从 JSON 到像素全包。每人对自己页面的四件事负责——模板能渲染、接口能通、JS 能跑、浏览器能开。
+
+代价要说清楚：**共享底座变成串行依赖**（A 的 `catalog` 不写完，B 的上传没处落）。这个代价用阶段 0 的契约冻结 + `fixtures/` 假数据抵掉，见 7.4。
+
+### 7.2 分工原则
+
+| # | 原则 | 落地方式 |
+|---|---|---|
+| 1 | **页面是交付单位，不是文件** | 谁的页面 = 模板 + 该页渲染函数 + 该页接口 + 该页 JS + 该页 CSS |
+| 2 | **底座两人对半分，边界按文件不按行** | A 拿数据侧（catalog / persist / storage / semver），B 拿运行时侧（config / app / server / errors / dto）。文件集合零重叠 |
+| 3 | **契约 D1 上午冻结，之后只许「先说 → 同改 → 通知」** | 见 7.4 |
+| 4 | **页面之间只通过 HTTP 接口和模板变量对话** | 不许 import 对方页面目录下的任何东西 |
+| 5 | **自己的清单自己跑完，再交叉跑对方的** | 见 7.9 |
+
+### 7.3 页面归属
+
+| 交付物 | 地址 | 负责人 | 竖切范围 | 对外的承诺 |
+|---|---|---|---|---|
+| **下载页** | `/` | **A** | `views/download.ejs`、`views/partials/`、`public/download.css`、`public/download.js`、`src/routes/pages/download.js`、`src/routes/download.js` | IE11 能打开；JS 全禁也能下到 8 个组合；断点续传与 304 |
+| **管理页** | `/admin` | **B** | `views/admin.ejs`、`public/admin.css`、`public/admin.js`、`src/routes/pages/admin.js`、`src/routes/upload.js`、`src/routes/releases.js` | Chrome/Edge 内跑完上传→核对→撤回→删除，不跳页 |
+| **数据底座** | — | **A** | `src/semver.js`、`src/catalog/`、`src/storage/`、`src/routes/index.js`、`src/middleware/cidr.js` | `catalog` 六个方法签名不漂移 |
+| **运行时 + 横切** | — | **B** | `src/config.js`、`src/app.js`、`src/server.js`、`src/middleware/errors.js`、`src/routes/dto.js` | 进程不死、超时正确、错误格式统一 |
+| **部署** | — | **B** | `Dockerfile`、`docker-compose.yml`、`.dockerignore`、离线 `save/load` | 一条 `docker compose up -d` 起得来 |
+| **公共样式** | — | 阶段 0 一起写 | `public/base.css`（重置 + 字体 + 顶部导航，约 60 行） | 冻结后不改，改要通知 |
+
+底座为什么这么对半分：A 拿的是「数据长什么样、怎么落盘」，B 拿的是「进程怎么活、响应长什么样、部署怎么起」。两边都不碰对方的文件，但各自的页面都能独立跑通。
+
+> 注：`stats`（下载计数）归 A，因为计数发生在 `/dl`；但状态条上要展示的「占用合计」由 B 从 `catalog.list()` 自己算，两边不共享内存结构。
+
+### 7.4 阶段 0：契约冻结（D1 上午，两人一起，约 2 小时）
 
 | 冻结项 | 落在哪个文件 | 要求 |
 |---|---|---|
 | 磁盘结构 | `src/catalog/types.js` | JSDoc 定义 `Release` 全部字段 |
 | 响应 DTO | `src/routes/dto.js` | `toReleaseDto()` 映射函数，**不许与磁盘结构共用对象** |
-| 存储接口 | `src/catalog/catalog.js` | `has / find / latest / list / add / setStatus` 签名 |
+| 存储接口 | `src/catalog/catalog.js` | `has / find / latest / list / add / setStatus` 签名，先返回 fixture 桩 |
 | 文件存储接口 | `src/storage/storage.js` | `save / abs / remove / probe / freeBytes` |
-| 路由表 | `src/routes/index.js` | 所有路径 + handler 名，先返回 501 |
+| 路由表 | `src/routes/index.js` | 所有路径 + handler 名，先返回 501（B 的 handler 由 A 挂） |
 | 错误格式 | `src/middleware/errors.js` | 统一 `{ error: "..." }` + 状态码 |
-| 模板文件名 | `views/` | `download.ejs` / `admin.ejs` 先占位 |
-| 模板变量 | `src/routes/pages.js` | 每个模板接收的 data 字段定死 |
+| 页面渲染入口 | `src/routes/pages/download.js` / `pages/admin.js` | 各自 `render(req)` 返回 `{ template, data }` |
+| 模板变量 | 同上 | 每个模板收到的 data 字段逐字段列死，写进 `docs/api-contract.md` |
+| 样式骨架 | `public/base.css` | 重置 + 字体 + 顶部导航，写完即冻结 |
 | 配置项 | `src/config.js` | 环境变量结构定死（含 `ADMIN_ALLOW_CIDR`） |
+| 假数据 | `fixtures/releases.sample.json` | 8 组合各 2 个版本，B 在 A 的底座可用前靠它对页面 |
+
+**v3.4 修正：`catalog` 在阶段 0 就用 fixture 桩实现。** 这是按页面切能不能并行的开关——`has/find/latest/list` 先读 `fixtures/releases.sample.json`；`add/setStatus` 先写内存数组 + 打日志（不落盘、不校验）。B 的上传流程能整条跑通，A 之后把实现换成真 JSON 落盘 + 原子写，调用方一行不改。
 
 **v3.3 修正：路由表要连方法一起冻结，不能只写路径。** v3.2 只规定了「有撤回/恢复功能」，没有给路由，A 和 B 各写各的就会对不上。冻结为：
 
-| 方法 | 路径 | 用途 | 阶段 0 |
-|---|---|---|---|
-| GET | `/` | 下载页 | 501 |
-| GET | `/admin` | 管理页 | 501 |
-| GET | `/dl/:version/:combo` | 包下载 | 501 |
-| GET | `/healthz` | 健康检查 | 501 |
-| GET | `/api/releases` | 版本列表（含筛选参数） | 501 |
-| POST | `/api/releases` | 上传（query 带 `version`/`platform`/`arch`） | 501 |
-| POST | `/api/releases/:id/yank` | 撤回 | 501 |
-| POST | `/api/releases/:id/unyank` | 恢复 | 501 |
-| DELETE | `/api/releases/:id` | 删除（墓碑） | 501 |
-| DELETE | `/api/orphans` | 清空孤儿目录 | 501 |
+| 方法 | 路径 | 用途 | 实现 | 阶段 0 |
+|---|---|---|---|---|
+| GET | `/` | 下载页 | A | 501 |
+| GET | `/admin` | 管理页 | B | 501 |
+| GET | `/dl/:version/:combo` | 包下载 | A | 501 |
+| GET | `/healthz` | 健康检查 | B | 501 |
+| GET | `/api/releases` | 版本列表（含筛选参数） | B | 501 |
+| POST | `/api/releases` | 上传（query 带 `version`/`platform`/`arch`） | B | 501 |
+| POST | `/api/releases/:id/yank` | 撤回 | B | 501 |
+| POST | `/api/releases/:id/unyank` | 恢复 | B | 501 |
+| DELETE | `/api/releases/:id` | 删除（墓碑） | B | 501 |
+| DELETE | `/api/orphans` | 清空孤儿目录 | B | 501 |
 
 冻结后的纪律：
 
@@ -1541,60 +1589,92 @@ host 模式的代价与对策：
 - 加路由 → 只由 A 改 `routes/index.js`
 - 契约变更顺手更新 `docs/api-contract.md`
 
-### 7.3 模块分工
+### 7.5 页面 ↔ 接口：切面到底在哪
 
-| 模块 | 文件 | 负责人 | 预估 |
-|---|---|---|---|
-| semver 解析与比较 | `src/semver.js` | **A** | 100 行 |
-| 磁盘结构与内存索引 | `src/catalog/types.js` `catalog.js` | **A** | 250 行 |
-| 原子写 / 三态加载 / tmp 清理 / 对账 | `src/catalog/persist.js` | **A** | 200 行 |
-| 下载计数 | `src/catalog/stats.js` | **A** | 70 行 |
-| 本地存储 + `probe` + `freeBytes` | `src/storage/` | **A** | 120 行 |
-| 上传接口（busboy 流式 + 哈希 + inflight） | `src/routes/upload.js` | **A** | 260 行 |
-| 服务入口 / 超时 / 启动自检 | `src/server.js` `config.js` | **A** | 120 行 |
-| 路由表 / 中间件 | `src/routes/index.js` `src/middleware/` | **A 维护**（阶段 0 共同产出） | 120 行 |
-| 下载接口（sendFile / ETag / 计数） | `src/routes/download.js` | **B** | 130 行 |
-| 响应 DTO + 错误格式 | `src/routes/dto.js` `src/middleware/errors.js` | **B** | 90 行 |
-| 页面渲染 | `src/routes/pages.js` | **B** | 200 行 |
-| EJS 模板 + CSS | `views/` `public/style.css` | **B** | 420 行 |
-| 前端交互 JS（ES5） | `public/download.js` `public/admin.js` | **B** | 120 行 |
-| Dockerfile + compose + 部署验证 | `Dockerfile` `docker-compose.yml` | **B** | 80 行 |
-
-合计：A 约 1240 行，B 约 1040 行（其中 540 行是 HTML/CSS，写起来比服务端逻辑快）。
-
-### 7.4 为什么这么切
-
-- **A 管「数据怎么进来」，B 管「数据怎么出去」**，中间只靠冻结的 `catalog` 接口对接，两边可以并行。
-- B 在 A 的存储层没写完之前，可以先用假数据渲染页面，**不阻塞**。
-- 唯一的重叠点是 `routes/index.js`，用「只由 A 改」的规则消灭。
-- Node 全栈的好处在分工上体现得很直接：**两人用同一套语言，A 写的工具函数 B 能直接看懂**，不像前后端分语言时要在接口之外再解释一遍。
-
-### 7.5 并行时序
-
-| 时间 | A | B |
+| 页面 | 消费什么 | 谁实现 |
 |---|---|---|
-| D1 上午 | 阶段 0：一起定契约、搭骨架 | 阶段 0：一起定契约、搭骨架 |
-| D1 下午 | semver + catalog（原子写、排序） | 两个页面的模板 + CSS（喂假数据） |
-| D2 上午 | storage + 上传（busboy 流式 + 哈希） | 下载接口（sendFile + ETag）+ 页面渲染 |
-| D2 下午 | 磁盘检查 + 启动自检 + 接真实数据 | 前端 JS（进度条、撤回/删除） |
-| D3 上午 | 联调 + 边界用例 | Dockerfile + 镜像构建 + 容器部署 |
-| D3 下午 | **一起跑验收清单（7.7）** | **一起跑验收清单（7.7）** |
+| 下载页 `/` | `GET /`（服务端直出：8 组合卡片 + 4 OS 摘要 + 版本历史） | A |
+| 下载页 | `GET /dl/:version/:combo` | A |
+| 管理页 `/admin` | `GET /admin`（状态条 + 空列表壳，行数据靠下面 API 拉） | B |
+| 管理页 | `GET /api/releases?platform=&status=` | B |
+| 管理页 | `POST /api/releases?version=&platform=&arch=` | B |
+| 管理页 | `POST /api/releases/:id/yank` / `unyank` | B |
+| 管理页 | `DELETE /api/releases/:id` | B |
+| 管理页 | `DELETE /api/orphans` | B |
+| 构建机 / CI | `POST /api/releases`（同一接口，不经页面） | B |
 
-两人并行约 2.5–3 天。比单人没快多少，差额全在契约冻结和联调。
+关键差异：**下载页是服务端直出，不调自己的 HTTP 接口**——它在 `pages/download.js` 里直接调 `catalog.list()` / `latest()`，把「4 个 OS × 8 组合」聚合完再交给 EJS。管理页是上传后局部刷新，全走 `fetch`。
 
-### 7.6 协作约定
+⚠️ **硬边界（写进文件头注释）：`pages/download.js` 不许 import `src/routes/dto.js`。**
+
+`dto.js` 归 B，下载页的模板变量归 A。如果 A 图省事直接拿 DTO 渲染，B 哪天给 DTO 加个字段或改个名，下载页会静默坏掉——而 B 完全不知道自己弄坏了 A 的页面。所以两页用两套数据结构：
+
+| 页面 | 数据来源 | 谁维护形状 |
+|---|---|---|
+| 下载页 | `catalog` 原始对象 → `pages/download.js` 自己组装 | A |
+| 管理页 | `toReleaseDto()` 输出 | B |
+
+同理，A 也不许在 `catalog.js` 里为下载页的展示需求加字段——展示逻辑放 `pages/download.js`。
+
+### 7.6 工作量账
+
+| 归属 | 内容 | 预估 |
+|---|---|---|
+| A · 数据底座 | semver 100 + catalog 250 + persist 200 + stats 70 + storage 120 + routes/index 60 + cidr 60 | 860 |
+| A · 下载页 | pages/download 90 + download.ejs & partials 150 + download.js 60 + download.css 90 + routes/download 130 | 520 |
+| **A 合计** | | **约 1380 行** |
+| B · 运行时 | config 60 + app 40 + server 60 + errors 50 + dto 40 | 250 |
+| B · 管理页 | pages/admin 130 + admin.ejs 200 + admin.js 70 + admin.css 110 + upload 260 + releases 150 | 920 |
+| B · 部署 | Dockerfile / compose / .dockerignore 80 + fixtures & 验收脚本 70 | 150 |
+| **B 合计** | | **约 1320 行** |
+
+两边差 60 行，可以忽略。**真正要盯的不是行数，是阻塞关系**：A 的 `catalog` 是 B 的依赖，A 停 B 就停。两条解耦措施已经在 7.4 里落地：
+
+1. `catalog` 先用 `fixtures/releases.sample.json` 桩实现 → 两边的页面和接口都能立刻开工
+2. 路由表阶段 0 定死、handler 先返 501 → B 写自己的 handler 不需要等 A 挂路由
+
+底层逻辑变了才通知对方（`catalog` 桩 → 真落盘），其他时间各自推。
+
+### 7.7 并行时序
+
+| 时间 | A（数据底座 + 下载页） | B（运行时 + 管理页 + 部署） |
+|---|---|---|
+| D1 上午 | 一起做阶段 0（2h）→ semver + `catalog` fixture 桩 | 一起做阶段 0（2h）→ `config/app/server` + `errors/dto` 骨架 + 两页 HTML 空壳 + `base.css` |
+| D1 下午 | `catalog` 真实现（排序、`latest`）+ `persist`（原子写、三态加载、tmp 清理）+ `storage` | `admin.ejs` + `admin.css` + `admin.js`（吃 fixture 渲染列表、筛选、按钮状态矩阵） |
+| D2 上午 | `pages/download.js` 聚合（8 组合 + 4 OS 摘要）+ `download.ejs` 接真数据 + `/dl`（sendFile + ETag） | `upload.js`（busboy 流式 + 哈希 + inflight + 409）+ 接真 `storage.save` |
+| D2 下午 | `download.js`（ES5：UA 定位、锚点）+ `stats` 计数 + IE11 自查 | `releases.js`（列表/撤回/恢复/删除/孤儿）+ 上传区交互 + 状态条 |
+| D3 上午 | Win7 真机 IE11 + Win10 自动定位 + 断点续传 / 304 | Dockerfile + 离线镜像 + 容器起停 + 只读挂载 503 |
+| D3 下午 | **交叉验收：A 跑管理页清单** | **交叉验收：B 跑下载页清单** → 一起过 7.9 全量 |
+
+两人并行 2.5–3 天，和按文件切持平。**按页面切不会更快，它买的是责任边界**——两人协作里，边界清楚比省半天值钱。
+
+三个卡点提前说，别到那天才发现：
+
+| 卡点 | 谁被卡 | 解法 |
+|---|---|---|
+| `catalog` 真实现没好 | B 的上传没法落盘 | 桩实现里 `add()` 先写内存数组 + console，B 照常联调，切真实现只改一行 import |
+| `/dl` 没写完 | B 没法验「上传后能下载」 | B 先用 `/data/releases/...` 的直链路径验证文件确实落盘，不依赖 A 的接口 |
+| `admin.js` 的按钮状态矩阵依赖 `status` + `file_missing` 两维 | B 等 A 的对账逻辑 | 对账逻辑 `persist.js` 在 D1 下午就有，B 直接造 fixture 数据覆盖 5 种组合 |
+
+### 7.8 协作约定
 
 | 项 | 约定 |
 |---|---|
-| 分支 | `main` 保护；A 用 `feat/storage-upload`，B 用 `feat/web-download`，小步合并 |
-| 冲突高发文件 | `src/server.js`、`routes/index.js`、`package.json`、`catalog/types.js` —— **只由 A 改** |
+| 分支 | `main` 保护；A 用 `feat/download-page`，B 用 `feat/admin-page`，小步合并 |
+| 单人独有（另一人不动） | A：`src/routes/index.js`、`src/routes/pages/download.js`、`src/routes/download.js`、`src/catalog/`、`src/storage/`、`src/middleware/cidr.js` |
+| 单人独有（另一人不动） | B：`src/config.js`、`src/app.js`、`src/server.js`、`src/routes/dto.js`、`src/middleware/errors.js`、`src/routes/upload.js`、`src/routes/releases.js`、`src/routes/pages/admin.js` |
+| 必须同改 | `src/catalog/types.js`、`package.json`、`package-lock.json`、`public/base.css` |
 | 提交粒度 | 一个功能一个提交，禁止攒一天一次性提交 |
 | 每日同步 | 下班前各自合到 `dev`，第二天从 `dev` 起步 |
 | 接口变更 | 只走「先说 → 同改 → 通知」三步 |
-| 代码评审 | 互相看核心逻辑：A 看前端有没有引入 ES6 语法 / CDN，B 看上传有没有把文件读进内存 |
-| 依赖 | 加任何 `dependencies` 必须两人同意，并同时更新 `package-lock.json` |
+| 代码评审 | 互相看对方的页面：A 查管理页有没有把文件读进内存、有没有绕过 `toReleaseDto()`；B 查下载页有没有混进 ES6 语法 / CDN / `import dto.js` |
+| 依赖 | 加任何 `dependencies` 必须两人同意，并同时更新 `package.json` 与 `package-lock.json` |
 
-### 7.7 验收清单（两人共同跑一遍）
+**为什么两个页面的评审线是交叉的**：按页面切最大的风险是「我自己的页面我说了算」——下载页引入一个 `fetch`，在 B 的 Chrome 上测不出来，到了 Win7 才炸。所以评审必须由**不用这个页面的人**来做，他看的是约束（ES5、无 CDN、只读），不是功能。
+
+### 7.9 验收清单（41 条）
+
+规则：**谁写的代码谁先跑**，跑完再交叉跑一遍对方的（见下面的认领表）。清单本身沿用 v3.3，未改内容。
 
 1. **首次启动**：`/data` 为空目录，服务正常起来并生成空的 `releases.json`（不是拒绝启动）
 2. 8 个平台各传一个包，下载页按平台正确分块（Win7 / Win10 为独立区块），每块版本号正确
@@ -1641,31 +1721,42 @@ host 模式的代价与对策：
 40. **续传不重复计数**：`curl -C -` 分三次续传同一个包，`stats.json` 里这个 id 的计数只 +1（若中途换过文件则允许 +2）
 41. **构建机上传不被 CIDR 挡**：从 CI 机器 `curl -X POST` 传一个小文件，必须 201，不能 403
 
-### 7.8 备选分工（两人能力差异较大时）
+#### 按页面认领
 
-如果一人对 Node 不熟：
+| 主责 | 用例编号 | 数量 | 特征 |
+|---|---|---|---|
+| **A**（底座 + 下载页） | 1, 4, 7, 11, 13, 16, 18, 19, 20, 25, 27, 29, 30, 32, 35, 40, 41 | 17 | JSON 落盘、对账、tmp、续传/304、IE11、CIDR |
+| **B**（运行时 + 管理页 + 部署） | 3, 5, 6, 8, 9, 10, 14, 17, 21, 22, 24, 26, 33, 34, 36, 37, 39 | 17 | 上传流式、并发 409、进程存活、容器生命周期、编码 |
+| **共同**（跨页面 / 跨人） | 2, 12, 15, 23, 28, 31, 38 | 7 | 两个页面要同时在场才能验 |
 
-- 熟的人做 A 全部 + 帮 B 把 `pages.js` 写完
-- 不熟的人只做模板 + CSS + JS + Dockerfile，**不碰 catalog 内部**，只消费已经组装好的数据对象
-- 前提是阶段 0 由熟的人先把模板变量结构定好，照着渲染即可
+交叉验收的顺序建议：**B 先跑下载页清单**（下载页只需要只读数据，B 造几个包就能验），**A 再跑管理页清单**（此时 A 的底座已经稳，重点看上传的边界）。谁跑出问题，谁的页面谁改，不互相等。
 
-如果两人都偏后端、都不想做前端：
+### 7.10 备选分工（两人能力差异较大时）
 
-- 模板用最朴素的 `<table>`，CSS 只写 80 行基础排版
-- 页面丑一点不影响内网使用，但下载错平台会影响——所以平台分组必须清楚
+按页面竖切的前提是**两人都能写服务端**。如果这个前提不成立，就别硬套，退回横切：
+
+| 情况 | 怎么分 | 代价 |
+|---|---|---|
+| 一人对 Node 不熟 | 熟的人拿**两个页面的服务端 + 全部底座**；不熟的人只做 `views/` + `public/*.css` + `public/*.js`，且只消费熟的人组装好的模板变量 | 页面竖切失效，模板变量一改就要两人同步；不熟的人不碰 `catalog`、不碰 `upload.js` |
+| 一人偏前端、一人偏后端 | 后端的人拿 A（底座 + 下载页服务端）；前端的人拿 B 的管理页 UI + 下载页模板 CSS，但 `upload.js` 由后端的人写 | 管理页会切成「B 写页面、A 写接口」，边界在 `pages/admin.js` 的入参上，必须阶段 0 就把字段列死 |
+| 两人都偏后端、都不想写前端 | 模板用最朴素的 `<table>`，CSS 各写 80 行，`base.css` 砍到 30 行 | 页面丑不影响内网使用；但**平台分组必须清楚**，下错平台比丑严重得多 |
+
+**如果中途有人请假**，按页面切的交接成本反而更低：接手的人只需要读对方一个页面的 500 行代码，不用把全栈都过一遍。这是选竖切的隐含好处。
 
 ---
 
 ## 8. 里程碑
 
-| 阶段 | 内容 | 验收 |
-|---|---|---|
-| M1 | 骨架 + 启动自检 + JSON 存储 + semver + 上传接口 | 空 `/data` 首次启动成功；curl 传 100MB 落盘正确；同版本重传 409 |
-| M2 | 下载接口 + 下载页 | 能下、能断点续传、二次下载 304、sha256 与页面对得上 |
-| M3 | 管理页（上传 + 版本列表） | 一页内完成上传、核对、撤回、删除，无需跳转 |
-| M4 | 磁盘检查 + 对账 + Dockerfile + 离线导入 | `save/load` 后起容器；数据挂卷；`docker rm` 重建后记录还在；只读挂载时 healthz 返 503 |
+| 阶段 | 内容 | 负责人 | 验收 |
+|---|---|---|---|
+| M1 | 骨架 + 启动自检 + JSON 存储 + semver + 上传接口 | A（底座）/ B（运行时 + 上传） | 空 `/data` 首次启动成功；curl 传 100MB 落盘正确；同版本重传 409 |
+| M2 | 下载接口 + 下载页 | **A** | 能下、能断点续传、二次下载 304、sha256 与页面对得上 |
+| M3 | 管理页（上传 + 版本列表） | **B** | 一页内完成上传、核对、撤回、删除，无需跳转 |
+| M4 | 磁盘检查 + 对账 + Dockerfile + 离线导入 | A（对账）/ B（镜像与部署） | `save/load` 后起容器；数据挂卷；`docker rm` 重建后记录还在；只读挂载时 healthz 返 503 |
 
 代码量估计 2300–2600 行（服务端约 1400 + 模板样式 1000）。单人约 3 天，双人并行 2.5–3 天。
+
+四个里程碑正好对应页面归属：**M2 只有 A 一个人，M3 只有 B 一个人**，M1 和 M4 是两人各拿一半。这个结构在排期时很好用——M2 卡住就是 A 的问题，M3 卡住就是 B 的问题，不存在「互相等」。
 
 ---
 
@@ -1676,7 +1767,7 @@ host 模式的代价与对策：
 3. **服务端口 8080 是否被占？** 开工前确认。
 4. **内网 Docker / Compose 版本？** compose 用的是 v2 语法，需要 Docker Compose v2。
 5. **宿主机有没有独立数据盘挂 `/srv/online_exe/data`？** 没有的话至少确认根分区剩余 60GB。
-6. **两人各自更擅长哪一侧？** 决定 7.3 按原样执行，还是切到 7.8。
+6. **两人各自能不能独立写服务端？** 能 → 按 7.3 页面竖切；有一人只会前端 → 退到 7.10 的横切方案。
 7. **管理页的来源网段是什么？** 填 `ADMIN_ALLOW_CIDR`，填错管理页直接 403；**构建机网段也要算进去**，否则 CI 上传 403。
 8. **构建机能不能联网跑 `npm ci`？** 如果构建机也断网，需要提前把 `node_modules` 打包成离线产物，或搭一个内网 npm 源。
 9. **能不能用 `network_mode: host`？**（v3.3 新增）运维如果有统一的 Docker 网络规范，需要先确认。不能用的话，必须按 4.8 实测源 IP，再决定 `ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 还有没有意义。
@@ -1684,9 +1775,9 @@ host 模式的代价与对策：
 
 ---
 
-## 附录：审核修订记录（v3.2 → v3.3）
+## 附录：审核修订记录（v3.2 → v3.4）
 
-本轮修订先用 Node.js / busboy / send 的官方源码逐条核验了方案里的事实性断言，再交叉检查内部一致性。下表是全部改动，按严重度排序。
+v3.2 → v3.3 部分先用 Node.js / busboy / send 的官方源码逐条核验了方案里的事实性断言，再交叉检查内部一致性。下表是全部改动，按严重度排序。**E 节是 v3.4 的分工变更**，只动第 7 节与支撑它的目录结构。
 
 ### A. 硬伤（不改会出事）
 
@@ -1756,3 +1847,23 @@ host 模式的代价与对策：
 | `rename` 只改目录项、峰值一份，系数 1.1 合理 | 文件系统语义 |
 | EJS 无内置 layout | 依赖表里只有 `express`/`busboy`/`ejs` |
 | `Content-Disposition` 需要 ASCII 回退给 IE11 | RFC 6266 / IE11 行为 |
+
+### E. v3.4：分工改按页面竖切
+
+技术设计一行没改，只重排了分工。改之前的问题和改之后的代价都记在这里，免得下次又想改回去。
+
+| # | 位置 | v3.3 的问题 | v3.4 的处理 |
+|---|---|---|---|
+| 1 | 第 7 节 | 按文件切（A 数据进来 / B 数据出去），一个页面被两人共有，出问题没人认 | 改为按页面竖切：A 拿下载页全栈，B 拿管理页全栈 |
+| 2 | 4.2 目录 | `routes/pages.js` 一个文件装两个页面的渲染函数 | 拆成 `routes/pages/download.js` + `pages/admin.js` |
+| 3 | 4.2 / 4.7 | `public/style.css` 两人都往里加样式，冲突必现 | 拆成 `base.css`（共享·冻结）+ `download.css`（A）+ `admin.css`（B） |
+| 4 | 7.4 | 契约冻结只定签名，没解决「A 不写完 B 没法动」 | `catalog` 先用 `fixtures/releases.sample.json` 做桩，读写都能跑通 |
+| 5 | 7.5 | 没有规定两页之间的数据边界 | 硬规则：`pages/download.js` 不许 import `dto.js`；下载页自己组装模板变量 |
+| 6 | 7.9 | 41 条验收清单没写谁主责 | 按页面认领：A 17 条 / B 17 条 / 共同 7 条，再交叉跑一遍 |
+| 7 | 8 | 里程碑没挂人，M2/M3 卡住不知道找谁 | M2 挂 A、M3 挂 B，M1/M4 各一半 |
+
+代价（接受，不打算改回去）：
+
+- **共享底座成为串行依赖**。A 的 `catalog` 是 B 的入口，桩实现是唯一解药；如果桩做不出来，这套分工就退回按文件切。
+- **工作量 1380 : 1320，看着平，但 A 的 860 行底座是硬骨头**（原子写、三态加载、对账），B 的 920 行管理页里有一半是模板和交互，写起来快。真跑起来 A 大概率是先落后、后追上。
+- **单页所有权带来「我说了算」风险**。用交叉评审（7.8）和 7.9 的交叉验收压住，但压不住「两人都不懂 IE11」这种能力问题。
