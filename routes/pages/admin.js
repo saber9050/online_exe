@@ -84,7 +84,7 @@ export async function renderAdmin(req, res, next) {
     suggestions.sort((a, b) => b.bytes - a.bytes)
 
     res.render('admin', {
-      title: '发版管理',
+      title: '管理端',
       page: 'admin',
       pageCss: 'admin',
       pageScript: 'admin',

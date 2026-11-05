@@ -18,12 +18,12 @@
     <a class="brand" href="/">
       <span class="brand-mark">&#9670;</span>
       <span class="brand-name"><%= cfg.appName %></span>
-      <span class="brand-sub"><%= cfg.appDescription %></span>
+      <span class="brand-sub"><%= page === 'admin' ? '版本管理' : cfg.appDescription %></span>
     </a>
     <% if (page === 'admin') { %>
     <nav class="nav-links">
       <a href="/">客户端下载</a>
-      <a href="/admin" class="active">发版管理</a>
+      <a href="/admin" class="active">管理端</a>
     </nav>
     <% } %>
   </div>
