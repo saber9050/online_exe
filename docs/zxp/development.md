@@ -138,7 +138,7 @@ stats.load()      装载 stats.json，下载计数接着算
 | `DATA_DIR` | `<root>/data` | 容器内固定 `/data` |
 | `MAX_UPLOAD_MB` | `800` | → busboy `limits.fileSize` |
 | `KEEP_PER_PLATFORM` | `5` | 清理建议口径，只提示不自动删 |
-| `APP_NAME` | `核心力量` | 仅首次初始化 `releases.json` 时写入 app 段 |
+| `APP_NAME` | `llm-wiki` | 仅首次初始化 `releases.json` 时写入 app 段；产品改名后统一在这里改默认值或传环境变量 |
 | `APP_DESCRIPTION` | `客户端` | 顶部导航副标题 |
 | `TZ` | `Asia/Shanghai` | 页面渲染与日志 |
 | `ADMIN_ALLOW_CIDR` | 空 | **支持逗号分隔多网段**；空 = 不限制 |
@@ -694,7 +694,7 @@ docker compose logs -f
 | 5 | `catalog` 实际签名 `get/getById/apply/withRecord/latest`，冻结表写 `has/find/add/setStatus` | 新人照文档写必踩空 | ⏳ 代码为准，需更新 `docs/api-contract.md`（纯文档工作，不阻塞开发） |
 | 6 | `yanked + file_missing` 仍渲染可点的「恢复」 | 点了才 409，多一次失败 | ✅ 模板里禁用并加 `title` 说明补救路径 |
 | 7 | `engines >= 20.11` / 方案 `>=24` / 镜像 `node:24-alpine` 三处打架 | 口径不清 | ✅ 统一为 `>=22`（代码真实下限 + 本地开发版本），生产镜像仍固定 24 |
-| 8 | `config.appName` 默认值是模板遗留的 `llm-wiki` | 忘记传 `APP_NAME` 时标题与 JSON 元信息都是错的 | ✅ 默认值改为 `核心力量 / 少儿跑酷客户端` |
+| 8 | `config.appName` 默认值曾是模板遗留值 | 忘记传 `APP_NAME` 时标题与 JSON 元信息都是错的 | ✅ 已随产品更名统一为 `llm-wiki / 客户端`（2026-11-05）；改名只改这一处或传环境变量 |
 
 另外顺手修掉两处文档承诺与实际行为不符的地方：
 

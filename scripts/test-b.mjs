@@ -115,7 +115,9 @@ async function main() {
   // ════════════════════════════════════════════════════════════════
   // 场景一：空目录首启 + 上传 + 查重 + 并发
   // ════════════════════════════════════════════════════════════════
-  const A = startServer({ dataDir: dataA, port: 19081 })
+  // 显式传 APP_NAME：这个用例要验的是「环境变量会写进首次初始化的 releases.json」，
+  // 不该跟着产品名改动而失效（应用名是运营层面的事，测试不该绑死某个品牌词）
+  const A = startServer({ dataDir: dataA, port: 19081, env: { APP_NAME: '测试应用' } })
   console.log('[场景一] 空 /data 首启、上传、409、并发')
 
   const readyA = await waitReady(A.url)
@@ -129,8 +131,8 @@ async function main() {
   const jsonA = await fs.readFile(path.join(dataA, 'releases.json'), 'utf8').catch(() => null)
   check('首启自动生成 releases.json', Boolean(jsonA))
   check(
-    'releases.json 写入 app 元信息为项目真实值',
-    Boolean(jsonA && jsonA.includes('核心力量')),
+    'releases.json 的 app 段写入 APP_NAME（环境变量生效）',
+    Boolean(jsonA && jsonA.includes('测试应用')),
     jsonA ? jsonA.slice(0, 80) : '文件不存在',
   )
 

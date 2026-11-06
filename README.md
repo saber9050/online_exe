@@ -160,8 +160,8 @@ npm run seed
 | `DATA_DIR` | `<项目>/data` | 数据目录；容器内固定 `/data` |
 | `MAX_UPLOAD_MB` | `800` | 单包上限；实际产物 300–400MB，留 2 倍余量 |
 | `KEEP_PER_PLATFORM` | `5` | 清理建议的保留数（只提示，不自动删） |
-| `APP_NAME` | `核心力量` | 页面标题；仅首次初始化 `releases.json` 时写入 |
-| `APP_DESCRIPTION` | `少儿跑酷客户端` | 顶部导航副标题 |
+| `APP_NAME` | `llm-wiki` | 页面标题；仅首次初始化 `releases.json` 时写入 |
+| `APP_DESCRIPTION` | `客户端` | 顶部导航副标题 |
 | `TZ` | `Asia/Shanghai` | 页面渲染与日志时区 |
 | `ADMIN_ALLOW_CIDR` | 空 | 空=不限制；填 `10.20.0.0/16` 则只允许该网段访问 `/admin` 与 `/api/*`，支持逗号分隔多个 |
 | `STATS_FLUSH_SEC` | `30` | 下载计数落盘间隔 |

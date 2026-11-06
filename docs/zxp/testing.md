@@ -153,12 +153,12 @@ Get-Content F:\tmp\oe-empty\releases.json -Encoding UTF8
 
 > `-Encoding UTF8` 不能省：去掉它会按 ANSI 读，中文显示成 `鏍稿績鍔涢噺`，看着像文件损坏，其实文件是好的（用 `od -c` 或浏览器打开都能验证）。
 
-内容应为：
+内容应为（`app.name` 取 `APP_NAME`，默认 `llm-wiki`；名字改过就以下面的实际默认值为准）：
 
 ```json
 {
   "schema": 3,
-  "app": { "name": "核心力量", "description": "少儿跑酷客户端" },
+  "app": { "name": "llm-wiki", "description": "客户端" },
   "releases": []
 }
 ```
