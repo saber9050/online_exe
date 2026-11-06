@@ -1,0 +1,137 @@
+<%- include('partials/head', { title: title, page: page, pageCss: pageCss }) %>
+
+<main class="wrap">
+  <section class="hero">
+    <h1><%= cfg.appName %> 客户端下载</h1>
+    <p class="hero-sub">按系统选择对应安装包。各平台、各架构独立发版，版本号互不影响。</p>
+
+    <div class="summary">
+      <% groups.forEach(function(g, i){ %>
+        <% if (i > 0) { %><span class="sep">/</span><% } %>
+        <span class="sum-item">
+          <span class="sum-os"><%= g.short %></span>
+          <% if (g.summary) { %>
+            <b><%= g.summary.version %></b>
+            <% if (g.mixed) { %><i class="star" title="各架构版本不一致">*</i><% } %>
+            <% if (g.summary.is_prerelease) { %><span class="badge badge-beta">Beta</span><% } %>
+          <% } else { %>
+            <span class="dim">暂无</span>
+          <% } %>
+        </span>
+      <% }) %>
+    </div>
+
+    <% groups.forEach(function(g){ if (g.mixed) { %>
+      <p class="mixed-note">
+        <%= g.short %> 各架构版本不一致：
+        <% g.arches.forEach(function(a, i){ %><% if (i > 0) { %> · <% } %><%= a.id %> <%= a.latest ? a.latest.version : '暂无' %><% }) %>
+      </p>
+    <% } }) %>
+
+    <p class="anchor-nav">
+      <% families.forEach(function(f){ %><a href="#os-<%= f.anchor %>"><%= f.label %></a><% }) %>
+    </p>
+  </section>
+
+  <% families.forEach(function(f){ %>
+  <section class="family" id="os-<%= f.anchor %>">
+    <div class="family-head">
+      <h2><%= f.label %></h2>
+      <span class="family-count"><%= f.archReady %> / <%= f.archTotal %> 架构有包</span>
+    </div>
+
+    <% f.subs.forEach(function(g){ %>
+    <div class="subgroup" id="sub-<%= g.anchor %>">
+      <% if (f.subs.length > 1) { %>
+      <div class="subgroup-head">
+        <h3><%= g.label %></h3>
+        <span class="subgroup-count"><%= g.arches.filter(function(a){ return !!a.latest }).length %> / <%= g.arches.length %> 架构有包</span>
+      </div>
+      <% } %>
+      <% if (g.note) { %><p class="platform-note"><%= g.note %></p><% } %>
+
+      <div class="cards">
+        <% g.arches.forEach(function(a){ %>
+          <div class="card<%= a.latest ? '' : ' card-empty' %>">
+            <div class="card-top">
+              <span class="arch"><%= a.label %></span>
+              <% if (a.latest) { %><span class="ver"><%= a.latest.version %></span><% } %>
+            </div>
+
+            <% if (a.latest) { %>
+              <div class="card-badges">
+                <% if (a.latest.is_prerelease) { %><span class="badge badge-beta">Beta</span><span class="dim small">暂无正式版</span><% } %>
+                <% if (a.latest.file_missing) { %><span class="badge badge-danger">缺文件</span><% } %>
+              </div>
+              <div class="card-meta">大小 <b><%= fmtSize(a.latest.size) %></b></div>
+              <div class="card-meta">更新 <b><%= fmtDate(a.latest.uploaded_at) %></b></div>
+              <div class="card-meta dim">下载 <%= a.latest.downloads %> 次</div>
+              <% if (a.latest.file_missing) { %>
+                <span class="btn btn-disabled">文件缺失</span>
+              <% } else { %>
+                <a class="btn" href="<%= a.latest.download_url %>">下载</a>
+              <% } %>
+            <% } else { %>
+              <div class="card-meta dim">暂无版本</div>
+              <span class="btn btn-disabled">暂无</span>
+            <% } %>
+          </div>
+        <% }) %>
+      </div>
+    </div>
+    <% }) %>
+
+    <% if (f.mac) { %>
+      <div class="tip">
+        <b>macOS 首次打开被拦截？</b>
+        未签名应用会被 Gatekeeper 阻止。请右键应用 →「打开」，或到「系统设置 → 隐私与安全性」点「仍要打开」。
+      </div>
+    <% } %>
+  </section>
+  <% }) %>
+
+  <section class="history" id="history">
+    <div class="history-head">
+      <h2>版本历史</h2>
+      <span class="dim"><%= historyTotal > 20 ? '最近 20 条 · 共 ' + historyTotal + ' 条' : '共 ' + historyTotal + ' 条' %></span>
+    </div>
+
+    <div class="tabs">
+      <% historyTabs.forEach(function(t){ %>
+        <a class="tab<%= t.active ? ' is-active' : '' %>" href="<%= t.href %>"><%= t.label %><span class="tab-count"><%= t.count %></span></a>
+      <% }) %>
+    </div>
+
+    <% if (history.length === 0) { %>
+      <p class="empty"><%= activeOs === 'all' ? '还没有发布任何版本。' : '该分类下还没有发布版本。' %></p>
+    <% } else { %>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>版本</th><th>平台 / 架构</th><th>大小</th><th>更新时间</th><th>更新说明</th><th>下载</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% history.forEach(function(r){ %>
+          <tr class="<%= r.status === 'yanked' ? 'row-yanked' : '' %>">
+            <td>
+              <b><%= r.version %></b>
+              <% if (r.is_prerelease) { %><span class="badge badge-beta">Beta</span><% } %>
+              <% if (r.status === 'yanked') { %><span class="badge">已撤回</span><% } %>
+            </td>
+            <td><%= r.platformLabel %><span class="dim"> · <%= r.archLabel %></span></td>
+            <td><%= fmtSize(r.size) %></td>
+            <td><%= fmtDate(r.uploaded_at) %></td>
+            <td class="changelog"><%= r.changelog || '—' %></td>
+            <td><a class="link" href="<%= r.download_url %>">下载</a></td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <% } %>
+  </section>
+</main>
+
+<%- include('partials/foot', { page: page, pageScript: pageScript }) %>

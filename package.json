@@ -1,0 +1,24 @@
+{
+  "name": "online-exe",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "内网客户端发版平台 · 上传页与下载页",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "seed": "node scripts/seed-demo.js",
+    "test": "node scripts/test-b.mjs"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "ejs": "^3.1.10",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

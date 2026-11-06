@@ -1,0 +1,5 @@
+# 容器入口脚本必须是 LF：core.autocrlf=true 时检出成 CRLF，
+# 首行会变成 "#!/bin/sh\r"，busybox 报 "no such file or directory"，容器直接起不来。
+# start.sh 在 WSL / Linux 里跑，同理。
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf

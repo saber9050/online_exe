@@ -1,0 +1,13 @@
+node_modules/
+data/
+scripts/
+.git/
+.gitignore
+.idea/
+.workbuddy/
+.shots/
+docs/
+*.md
+*.log
+start.bat
+start.sh

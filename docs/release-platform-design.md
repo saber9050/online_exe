@@ -1,4 +1,4 @@
-# 内网客户端发版平台 · 方案设计
+ # 内网客户端发版平台 · 方案设计
 
 > 版本：v3.4　日期：2026-11-05　模块名：`online_exe`
 >
@@ -314,7 +314,7 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'))
 process.on('SIGINT',  () => void shutdown('SIGINT'))
 ```
 
-`stop_grace_period` 要大于这个 30 秒，否则 Docker 会在我们等上传的时候先 SIGKILL。见 6.4 的 compose 配置。
+`--stop-timeout` 要大于这个 30 秒，否则 Docker 会在我们等上传的时候先 SIGKILL。见 6.4 的 `docker run` 参数。
 
 **别在 shutdown 里直接 `process.exit()`**，那样 `stats.flush()` 和队列里的 JSON 写都不会执行完。上面每一步都是 `await` 完再退。
 
@@ -355,14 +355,18 @@ online_exe/
 ├── package.json
 ├── package-lock.json
 ├── src/
-│   ├── server.js              # 入口：http server + 三个超时 + 启动自检
-│   ├── app.js                 # Express 实例、中间件、路由挂载
-│   ├── config.js              # 环境变量装载与默认值
+│   ├── server.js              # 入口：启动自检 + http server + 四个超时 + 优雅退出
+│   ├── app.js                 # Express 实例、中间件、路由挂载、EJS locals
+│   ├── config.js              # 环境变量装载与默认值（路径基于项目根，不依赖 cwd）
+│   ├── semver.js              # 解析、拆分、比较
+│   ├── constants.js           # 8 组合白名单、平台/架构标签、下载页 OS 分组
+│   ├── format.js              # 展示层格式化：字节数、UTC → 本地时间
 │   ├── catalog/
 │   │   ├── types.js           # JSDoc 类型定义（不参与运行）
-│   │   ├── catalog.js         # 内存索引、排序、latest、inflight 占位
-│   │   ├── persist.js         # 原子写、三态加载、tmp 清理、对账
-│   │   └── stats.js           # 下载计数（内存累加 + 定时落盘）
+│   │   ├── catalog.js         # 内存索引、唯一键、排序、latest
+│   │   ├── persist.js         # 原子写、三态加载、tmp 清理、对账、串行写队列
+│   │   ├── stats.js           # 下载计数（内存累加 + 定时落盘）
+│   │   └── orphan.js          # 孤儿文件枚举 / 删除（data/orphan/）
 │   ├── routes/
 │   │   ├── index.js           # 路由表（只由 A 改）
 │   │   ├── dto.js             # HTTP 响应结构，与磁盘结构分离
@@ -371,14 +375,13 @@ online_exe/
 │   │   │   └── admin.js       # 管理页渲染（参数按 DTO 形状）
 │   │   ├── upload.js          # busboy 流式上传
 │   │   ├── download.js        # sendFile + 自定义 ETag + 计数
-│   │   └── releases.js        # 列表 / 撤回 / 恢复 / 删除
+│   │   └── releases.js        # 列表 / 撤回 / 恢复 / 删除 / 孤儿接口
 │   ├── middleware/
 │   │   ├── cidr.js            # /admin 与写接口的来源网段限制
 │   │   └── errors.js          # 统一错误响应
-│   ├── storage/
-│   │   ├── storage.js         # 接口：save / abs / remove / probe / freeBytes
-│   │   └── local.js           # 本地磁盘实现
-│   └── semver.js              # 解析、拆分、比较
+│   └── storage/
+│       ├── storage.js         # 接口门面：换存储只改这一行 import
+│       └── local.js           # 本地磁盘实现
 ├── views/                     # EJS 模板
 │   ├── partials/
 │   │   ├── head.ejs           # <head> + 顶部导航
@@ -393,6 +396,9 @@ online_exe/
 │   └── admin.js
 ├── fixtures/
 │   └── releases.sample.json   # 8 组合各 2 个版本，页面开发期的假数据
+├── scripts/                   # 开发脚本，不进镜像
+│   ├── seed-demo.js           # 灌演示数据（npm run seed）
+│   └── test-b.mjs             # 本机验收脚本（npm test）
 ├── data/                      # 运行时挂载，.dockerignore 排除
 │   ├── releases.json
 │   ├── releases.json.bak
@@ -400,7 +406,8 @@ online_exe/
 │   ├── releases/
 │   └── orphan/
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-entrypoint.sh       # 容器入口：修 /data 属主后降权到 uid 1000
+├── start.sh / start.bat       # 本机一键启动（开发用）
 ├── .dockerignore
 └── docs/
 ```
@@ -540,11 +547,11 @@ function enqueueWrite(fn) {
 |---|---|
 | 版本格式 | 严格 semver：`MAJOR.MINOR.PATCH[-prerelease]`，允许前缀 `v`，**但入库前必须去掉**（见下） |
 | 唯一键 | **`(platform, arch, version)`** 组合唯一，`channel` 已从唯一键移除 |
-| **严格不可变** | 同版本号重复上传 → 一律 `409`（仅 `file_missing === true` 的记录除外，见下），**不提供覆盖**。传错了就发 `1.3.1` |
+| **同版本号不覆盖** | 在架（`active`）与已撤回（`yanked`）的记录**重复上传一律 409**，不提供覆盖，传错了就发 `1.3.1`。两种例外放行：`file_missing === true`（补文件）、`status === 'deleted'`（删掉重发），见下 |
 | 排序 | `major → minor → patch` 降序，正式版优先于预发布 |
 | 预发布回落 | 某平台只有预发布版本时，`latest` 回落到最高的预发布并标 Beta |
 | 撤回 | `status='yanked'`，文件保留，列表灰显，直链仍可下 |
-| 删除 | `DELETE /api/releases/:id`，前端二次确认（输入版本号）；**只删文件、记录改墓碑**，见下 |
+| 删除 | `DELETE /api/releases/:id`，前端二次确认（弹框写明版本 + 平台 + 不可恢复）；**只删文件、记录改墓碑**；删除后同版本号**可以重新发布**，见下 |
 | 渠道 | **由 `is_prerelease` 表达**：`false` = stable，`true` = beta，没有独立字段 |
 
 各平台独立取最新：**Win7 停 1.2.0、Win10 已到 1.4.0 是正常状态**，不要求 Win7 追上 Win10。
@@ -557,56 +564,61 @@ function enqueueWrite(fn) {
 
 - 不归一化 → `v1.3.0` 和 `1.3.0` 是两条独立记录、两个目录、下载页两行一样的版本号
 - `major/minor/patch` 拆分时也要先剥前缀，否则 `v1` 解析失败
-- 下载 URL `/dl/v1.3.0/...` 与 `/dl/1.3.0/...` 指向两份不同内容，`immutable` 缓存各自生效
+- 下载 URL `/dl/v1.3.0/...` 与 `/dl/1.3.0/...` 指向两份不同内容，缓存各自独立
 
 所以：**入口处 `const version = raw.replace(/^v/i, '')`，之后所有环节（唯一键、路径、JSON、URL）一律用归一化后的值**。原始输入只写进日志。
 
-#### 删除是「墓碑」，不是物理消失
+#### 删除是「墓碑」，但墓碑不阻止重新发布
 
-`DELETE` 不能真删记录 + 真删文件。那会留下一个漏洞：**删掉再以同一版本号传新包，内容就变了，而下载 URL 没变**——这正好击穿 4.6 的 `Cache-Control: immutable` 和本节「版本号不可变」的底线。用户缓存了旧 `1.3.0`，永远看不到新包，报障时谁也说不清。
-
-改成墓碑：
+`DELETE` 不真删记录：文件立即从磁盘删除，记录保留，`status` 置 `deleted`，`object_key` 留着（指向已不存在的文件）。
 
 ```js
 // DELETE /api/releases/:id
-await fs.unlink(storage.abs(rel.object_key)).catch(() => {})
+await storage.remove(rel.object_key)
 rel.status = 'deleted'
 rel.file_missing = false      // 墓碑不是「文件意外丢失」，是「文件被主动删除」，别混淆
-// 保留 id / version / platform / arch / object_key，只清掉可回收字段
 ```
 
-- 记录**不删**，`status` 置 `deleted`，`object_key` 保留（指向已不存在的文件）
-- 管理页默认不显示墓碑行，筛选项「已删除」可查
-- 查重逻辑天然拦住：`existing && existing.file_missing !== true` → 409，墓碑也会命中
+- 管理页默认不显示墓碑行，筛选项「已删除」可查——留痕用：什么时候删过哪个版本，事后还能翻到
 - `latest()` 只认 `status === 'active'`，墓碑自动排除
-- **对账必须跳过墓碑**。否则重启时对账发现「记录在、文件没了」，会把墓碑标成 `file_missing = true`，查重条件随即放行——不可变保护被自己绕开了。见 4.0.2
-- 墓碑占的空间可以忽略（几百字节），换来不可变性不会被绕过
+- **对账必须跳过墓碑**。否则重启对账发现「记录在、文件没了」，会把墓碑标成 `file_missing = true`，页面冒出红标，看着像丢文件事故。见 4.0.2
+- **墓碑不挡重发**：删除的语义是「这个版本作废、东西没了」。既然文件已经删了，就不该再用「已存在」拦住重新上传同一个版本号
 
-#### `file_missing` 记录的重传例外
+#### 允许重传的两种情况
 
-`file_missing === true` 表示「记录在、文件没了」（对账发现）。如果严格按不可变规则挡住同版本上传，用户就永远修不好这条记录——他必须先找到记录、删掉、再重传。
-
-所以查重逻辑要放行这一种情况：
+查重只看一件事：这条记录还在不在用。
 
 ```js
-const existing = catalog.get(key)
-if (existing && existing.file_missing !== true) {
-  return res.status(409).json({ error: '该版本已存在，请改用新版本号' })
+// 返回 true = 已被占用，拒绝上传
+function isVersionTaken(rec) {
+  if (!rec) return false
+  if (rec.file_missing === true) return false   // 记录在、文件没了 → 补传
+  if (rec.status === 'deleted') return false    // 墓碑 → 删掉后重新发布
+  return true                                   // active / yanked → 409
 }
-// 文件缺失的记录：允许重传补齐
 ```
 
-**重传必须沿用原 `id`。** `stats.json` 的 key 就是 `id`，`id` 换了计数必然对不上，除非再写一段迁移逻辑。
+| 情况 | 为什么放行 |
+|---|---|
+| `file_missing === true` | 否则用户永远修不好这条记录：必须先删再传，多一步且容易忘 |
+| `status === 'deleted'` | 删除后想原样重发同一版本；逼他改版本号只会产出「1.3.0 与 1.3.0-fix 并存」这种垃圾版本号 |
 
-改为 `buildRecord({ id: existing?.id ?? newId(), ... })`。同一条版本记录从头到尾只有一个 `id`，下载计数、`uploaded_at` 之外的元数据都自然延续。
+**重传必须沿用原 `id`。** `stats.json` 的 key 就是 `id`，换了计数必然对不上。`buildRecord({ id: existing?.id ?? newId(), ... })` 保证同一条版本记录只有一个 `id`，下载计数连续。
 
-注意墓碑（`status === 'deleted'`）**不适用**这个例外——它的 `file_missing` 是 `false`，会正常命中 409。删掉就是删掉了，想再发就换版本号。
+在架（`active`）与已撤回（`yanked`）仍然 409：这两种状态下文件还在，覆盖等于「同一个 URL 换内容」。所以要改内容，路径只有一条——先删，再传。
 
-#### 为什么不支持覆盖
+#### 下载缓存从 immutable 改成 no-cache
 
-允许覆盖同版本，跟下载侧的 `Cache-Control: immutable` 是**直接冲突**的：浏览器缓存了 `/dl/1.3.0/windows10-x64` 之后一年内不再发请求，包覆盖了也拿不到新的，用户只会说「我下了但程序没变」，极难排查。
+允许「删除后重发同一版本号」的直接后果：`/dl/1.3.0/windows10-x64` 在不同时间可能对应不同内容。
 
-两条路：给 URL 加内容指纹，或者禁止覆盖。选了后者，因为**版本号不可变是发版系统的底线**——同一个 `1.3.0` 在不同时间对应不同内容，会让「用户报的问题到底对应哪个二进制」永远说不清。
+原方案给它设 `Cache-Control: public, max-age=31536000, immutable`，前提正是「版本号不可变」。现在这个前提破了，缓存策略必须同步改，否则用户会「下了但程序没变」，且从现象上根本查不到原因：
+
+```js
+res.setHeader('ETag', `"${rel.sha256}"`)            // 内容指纹，没变就 304
+res.setHeader('Cache-Control', 'public, no-cache')  // 可以存，但每次必须回源校验
+```
+
+代价是每次下载多一个条件请求（未变化时返回 304，几乎零带宽）；收益是用户永远拿到当前那一份。内网千兆、十几个人，这点开销可以忽略。
 
 #### latest 的选取逻辑
 
@@ -907,7 +919,7 @@ if (!PLATFORM_ARCH_SET.has(`${platform}-${arch}`)) return res.status(404).send('
 |---|---|
 | 断点续传 | `res.sendFile(absPath)`，底层 `send` 库原生支持 `Range` / `If-Range` |
 | 自定义 ETag | `sendFile(p, { etag: false, lastModified: false })` + 手动 `res.setHeader('ETag', '"' + sha256 + '"')` |
-| 缓存 | `Cache-Control: public, max-age=31536000, immutable` |
+| 缓存 | `Cache-Control: public, no-cache` + 内容 sha256 做 ETag（每次回源校验，未变返回 304） |
 | 文件名 | `Content-Disposition: attachment; filename="<ASCII 回退>"; filename*=UTF-8''<encodeURIComponent>` |
 | 计数 | 内存累加，30s 落盘到 `stats.json`；**只在非 Range 请求或 Range 起点为 0 时 +1**，避免断点续传重复计数 |
 | 撤回版本 | `yanked` 仍可下载，保证老用户回滚不断链 |
@@ -926,12 +938,12 @@ res.setHeader('Content-Disposition',
 
 **不要再用 `req.fresh` 做计数判断**。`req.fresh` 依赖 `res` 上已经设置了 `ETag` 才能比较，而计数发生在 `sendFile` 之前、响应头还没设，此时它恒为 `false`；等 `sendFile` 之后再判断，响应已经发出去了。所以固定为「到达服务端的请求都计数」，语义是「用户点了一次下载」，这个数字对发版场景够用，不要写那种实际不生效的优化。
 
-**计数的口径要写准，别自欺欺人。** 用「304 也 +1」来弥补缓存命中是无效的——在 `immutable` 生效的场景下浏览器**根本不会发请求**，连 304 都没有。所以这个数字的真实含义是：
+**计数的口径要写准，别自欺欺人。** 用 `no-cache` 之后浏览器每次都会回源校验，所以这个数字的含义是：
 
-- 包含：首次下载、强制刷新、直接用 `curl` 拉
-- 不包含：`immutable` 有效期内的重复下载（浏览器本地消化，服务端零感知）
+- 包含：首次下载、强制刷新、直接用 `curl` 拉，以及**本地已缓存但回来校验的那次**（可能直接 304，没有正文）
+- 不包含：浏览器根本没发起请求的场景（例如下载被拦、用户没点）
 
-想让数字接近真实分发量，只有给 URL 加内容指纹或去掉 `immutable`。当前场景（内网、人数少、只想看「这个包有没有人下」）不值得为此付出代价，**接受这个口径并在页面上标注「统计口径：服务端收到的下载请求」**即可。
+想让数字严格等于「分发出去的包数」，只能靠 URL 加内容指纹或客户端上报，当前场景（内网、人数少、只想看「这个包有没有人下」）不值得，**接受这个口径并在页面上标注「统计口径：服务端收到的下载请求」**即可。
 
 另一个必然踩到的点：**断点续传会发多个 Range 请求**，一次下载可能变成好几次计数。所以计数要加条件——`Range` 头缺失，或 `Range` 起点是 0（`bytes=0-`），才算一次新下载：
 
@@ -945,7 +957,7 @@ if (isNewDownload) stats.inc(rel.id)
 
 我们只认内容哈希：关掉 `lastModified`，ETag 用 sha256。缓存语义收敛成一个判据，不会互相打架。
 
-**`immutable` 成立的前提是版本号不可变**。因为不支持覆盖（见 4.4），同一个 URL 永远对应同一份内容，这个缓存头才敢设一年。
+**为什么不用 `immutable`**：它成立的前提是「同一个 URL 永远对应同一份内容」。而 4.4 允许「删除后重发同一版本号」，这个前提已经不存在了——真要设一年不可变，用户删了重发之后会一直拿到旧包，报障时只能靠猜。所以退一步：`no-cache` + ETag 协商，未变化时仍是 304，只是多一个往返。
 
 ```js
 export async function download(req, res, next) {
@@ -978,7 +990,8 @@ export async function download(req, res, next) {
   res.setHeader('Content-Disposition',
     `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(rel.filename)}`)
   res.setHeader('ETag', `"${rel.sha256}"`)            // 内容哈希
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  res.setHeader('ETag', `"${rel.sha256}"`)
+  res.setHeader('Cache-Control', 'public, no-cache')
 
   res.sendFile(abs, {
     etag: false,          // 别让 send 用 mtime 生成 ETag
@@ -1050,7 +1063,7 @@ views/
 
 两页各 include 一次，十行代码的事，不值得为它引一个依赖。
 
-**静态资源不要设 `immutable`**。`/dl/` 下的包有版本号做指纹，可以缓存一年；但 `base.css`、`download.css`、`admin.js` 没有指纹，设长了改版后用户会一直拿旧文件，表现是「改了样式但没生效」。让它们走默认的 `ETag + 协商缓存`（304）就够了。真要长缓存，得给文件名加内容哈希，那是另一个工程量。
+**静态资源不要设长缓存**。`base.css`、`download.css`、`admin.js` 没有内容指纹，设长了改版后用户会一直拿旧文件，表现是「改了样式但没生效」。让它们走默认的 `ETag + 协商缓存`（304）就够了。真要长缓存，得给文件名加内容哈希，那是另一个工程量。`/dl/` 下的包也不设长缓存了，理由见 4.6。
 
 **版本历史表格默认只渲染最近 20 条**，其余折叠展开。IE11 渲染几百行 `<tr>` 会明显卡顿，而这个页面是给人「找某个旧版本」用的，全量渲染没有意义。
 
@@ -1158,9 +1171,13 @@ IE11 里 CSS 完全可用，这个方案不依赖任何脚本能力，也不需�
   - `yanked` + `file_missing`：`重新上传` / `恢复` / `删除`
   - `deleted`（墓碑）：无操作，只在「已删除」筛选下可见
 - `file_missing` 是「记录在、文件没了」的事实，与是否已撤回无关。用户想修复只有两条路：重新上传同版本（4.4 的查重对 `file_missing` 放行），或者删掉记录重来。如果只给「删除」，用户得先删再传，多一步且容易忘；给「重新上传」按钮是更自然的引导
-- `删除` 需输入版本号二次确认，`撤回` 单击即可（可逆）。删除是墓碑，**不可恢复**，文案要写「删除后该版本号作废，不可再上传同版本」
+- `删除` 用确认弹框二次确认（文案里带版本 + 平台 + 架构，明确写「不可恢复、该版本号作废」并提示可改用「撤回」），`撤回` 单击即可（可逆）。**不要求手打版本号**——手打只是复制粘贴负担，拦不住误操作，反而让人养成无脑粘贴的习惯；真正起作用的是「弹框 + 把后果写全 + 给出可逆替代」。删除是墓碑，**不可恢复**。
 - 筛选项：平台、状态（全部 / 正式 / 预发布 / 已撤回 / 缺文件 / 已删除）
 - 底部「清理建议」：列出每个 `platform-arch` 组合除最近 `KEEP_PER_PLATFORM` 个版本之外的旧包及占用，**只列出，不自动删**。口径是 8 个组合，不是 4 个 OS
+
+**列表区的操作全部在前端完成，不整页刷新。** 撤回/恢复只改这一行的徽章与按钮，删除只把这行摘掉并同步状态条数字；**筛选也是前端显隐**——服务端一次把全部记录渲染进 DOM，并用 `row-hidden` 标出不匹配当前 URL 参数的行，切换下拉时只切这个类，地址栏用 `replaceState` 同步。当前筛选容不下刚操作的行时（例如在「正式」筛选下撤回），行淡化保留并提示「切换筛选后不再显示」，而不是立刻消失。
+
+理由很实际：整页刷新会同时丢掉滚动位置和「我刚操作的那一行」，列表变短时纵向滚动条消失还会让整张表横向重排——两件事叠起来就是肉眼可见的抖动，用户会以为记录被删了或页面坏了。
 
 为什么上传和列表必须同页：传完一个新包，最需要的动作是「确认它真的进去了、大小对不对、sha256 对不对」。列表在另一个页面，人就只能靠记忆或刷新两次来确认。
 
@@ -1204,7 +1221,7 @@ const addr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
 - `ADMIN_ALLOW_CIDR=10.20.0.0/16` 会把**所有**管理页请求 403，日志里那个地址看着还挺"正常"
 - `uploaded_ip` 全部记成同一个网关地址，5 节「谁传的说不清」这条防线直接失效
 
-所以 6.4 的 compose **默认改为 `network_mode: host`**，容器直接使用宿主机网络栈，源 IP 百分之百真实。验证命令：
+所以 6.4 的部署命令 **默认 `--network host`**，容器直接使用宿主机网络栈，源 IP 百分之百真实。验证命令：
 
 ```bash
 # 容器内起个临时端口，从另一台内网机器访问，看打印的地址是不是那台机器的 IP
@@ -1268,9 +1285,9 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 
 | 风险 | 处置 |
 |---|---|
-| 误删版本 | 删除必须输入版本号；默认只提供「撤回」，物理删除是二级操作 |
+| 误删版本 | 删除走二次确认弹框（列出 版本 + 平台 + 架构，写明不可恢复、版本号作废，并提示「只想下架用撤回」）；默认只提供「撤回」，物理删除是二级操作 |
 | 误覆盖版本 | 已从机制上消除：版本号严格不可变，同版本一律 409（`file_missing` 记录例外） |
-| **删除后重传击穿不可变** | 删除改为墓碑：`status='deleted'` 保留记录，查重照样 409。否则"删了再传"等于给同一个 URL 换了内容，`immutable` 缓存和版本追溯同时失效 |
+| 删除后重传换了内容 | 删除改为墓碑（留痕），但**不阻止重发同版本号**；同时把下载缓存从 `immutable` 退成 `no-cache` + ETag，保证重发后客户端能拿到新包 |
 | **失败路径的 promise 泄漏** | 上传中断时 `tasks` 无人消费，pipeline 的 rejection 会变成未捕获异常直接杀进程。所有异步任务当场挂 `.catch`，`abort()` 里用 `Promise.allSettled` 收尾 |
 | 磁盘写满 | 上传前检查剩余空间（1.1 倍）；管理页顶部常驻显示；`/healthz` 写盘探针失败即标 unhealthy |
 | 路径穿越 | `platform`/`arch` 白名单 + 版本号正则 + 磁盘名程序生成，三重挡 |
@@ -1292,7 +1309,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 | 容器重建丢数据 | 数据全在宿主机挂载目录，容器无状态 |
 | 谁传的说不清 | `uploaded_ip` + `uploaded_at` 记录在案。**前提是源 IP 真实**，见上一条 |
 | 下载计数虚高 | 断点续传会发多个 Range 请求，只对「无 Range 或 `bytes=0-`」计数 |
-| 下载计数偏低 | `immutable` 生效期内浏览器不发请求，服务端零感知。这是口径问题，不是 bug，页面上标注清楚 |
+| 下载计数偏高 | 改成 `no-cache` 后，本地已缓存时浏览器也会回来校验一次，这次可能被计成一次下载。属于口径问题，不是 bug，页面上标注清楚 |
 | 备份 | 整个 `/srv/online_exe/data` 目录拷走即可 |
 
 ### 5.1 几个平台特有的现实问题
@@ -1317,7 +1334,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
                                             │  U 盘 / 内网共享
                                             ▼
 内网服务器
-  docker load → docker compose up -d
+  docker load → docker run（见 6.4）
 ```
 
 镜像主要体积来自 `node:24-alpine` 基础层（~120MB），业务代码只有几百 KB。这个代价换来的是「内网不用装 node、不用 npm install」。
@@ -1337,26 +1354,35 @@ ls -lh online-exe-1.0.0.tar
 ```bash
 docker load -i online-exe-1.0.0.tar
 mkdir -p /srv/online_exe/data
-chown -R 1000:1000 /srv/online_exe/data     # 关键：与容器内 node 用户对齐
-docker compose up -d
-docker compose logs -f
+chown -R 1000:1000 /srv/online_exe/data     # 可选：入口脚本也会兜底修，手动做可省一次目录扫描
 ```
 
+> 挂载目录属主忘了改也不会挂：6.3 的入口脚本以 root 进来先试写、不行再 `chown -R` 然后 `su-exec` 降权。只有挂载点在 Windows 盘（`/mnt/*`）或 NFS 上 chown 才必然失败，那时脚本会打印告警并以 root 运行。
+
+启动用 `docker run`（参数见 6.4）。仓库不提供 compose 文件，`save/load` 也只搬镜像——配置文件不会跟着 tar 走，留着它只会让人以为服务器上敲 `docker compose up -d` 就能起。
+
 > 镜像版本号和业务版本号分开：镜像 `1.0.0` 是服务端程序版本，和客户端 `1.3.0` 没关系。
+>
+> 构建机不需要预配镜像加速：6.3 的 Dockerfile 已把基础镜像、apk、npm 三个源都指向国内镜像站，构建前无需改 `daemon.json`。
 
 ### 6.3 Dockerfile
 
 ```dockerfile
-FROM node:24-alpine
+# 国内镜像源预先写死，构建机不用先配 daemon.json
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
+FROM ${NODE_IMAGE}
 
-# tzdata 必装：alpine 默认没有时区文件
-RUN apk add --no-cache tzdata
+# tzdata 必装：alpine 默认没有时区文件；Alpine 官方 CDN 在国内慢，先换源
+# su-exec：入口脚本从 root 降回 node 用，比 gosu 小
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories \
+ && apk add --no-cache tzdata su-exec
 
 WORKDIR /app
 
 # 先拷依赖清单，利用层缓存：只改业务代码时不会重装依赖
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --no-audit --no-fund --registry=${NPM_REGISTRY}
 
 COPY . .
 
@@ -1367,7 +1393,11 @@ ENV NODE_ENV=production \
     MAX_UPLOAD_MB=800
 
 RUN mkdir -p /data && chown -R node:node /data
-USER node
+
+# 不写 USER node：入口脚本必须以 root 进来才能修挂载目录属主，
+# 修完立刻用 su-exec 降回 uid 1000 执行业务进程，权限模型不变。
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/data"]
 EXPOSE 8080
@@ -1375,57 +1405,56 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "src/server.js"]
 ```
+
+> 三个网络点（基础镜像 / apk / npm）都预置了国内源：构建机常是临时机器，让人先改 `daemon.json` 等于把「能不能构建」托付给环境配置。要回退官方源用 `--build-arg NODE_IMAGE=node:24-alpine`。
 
 几个刻意的选择：
 
 | 选择 | 原因 |
 |---|---|
-| `node:24-alpine` | 内置 `node` 用户（uid 1000），非 root 开箱可用 |
+| `node:24-alpine`（经国内代理站） | 内置 `node` 用户（uid 1000），非 root 开箱可用；直连 Hub 在国内常被限速到几十 KB/s |
+| `apk` 换阿里云源 | 官方 CDN 同样慢，不换源这层能卡几分钟 |
+| `npm ci --registry=npmmirror` | 依赖虽少，走国内源稳定；公司私服可用 build-arg 覆盖 |
 | `npm ci` 而不是 `npm install` | 严格按 lock 文件装，构建可复现；`install` 可能偷偷升级次版本 |
 | `--omit=dev` | 不带 nodemon 等开发依赖，镜像更干净 |
 | 先 COPY package\*.json 再 COPY 源码 | 只改代码时复用依赖层，构建从 2 分钟降到 5 秒 |
-| `USER node` | 与宿主机挂载目录属主对齐，避免上传时 `EACCES` |
+| `ENTRYPOINT` 修属主后 `su-exec` 降权 | 挂载目录属主由宿主机决定，忘了 `chown 1000:1000` 就是 `EACCES: mkdir '/data/releases'`。入口脚本兜底：可写则直接降权，不可写先 chown，chown 也失败（Windows 盘 / NFS）则告警后退回 root 运行 |
 | HEALTHCHECK 用 `node -e fetch` | alpine 里的 busybox wget 可用，但 node 自带 fetch 更稳 |
 
 **不要用多阶段构建**。纯 JS 没有编译产物，多阶段只会多一层 `node_modules` 复制，收益为零。
 
-### 6.4 docker-compose.yml
+### 6.4 部署命令（`docker run`）
 
-```yaml
-services:
-  online-exe:
-    image: online-exe:${IMAGE_TAG:-1.0.0}
-    container_name: online-exe
-    restart: unless-stopped
-    stop_grace_period: 45s        # 必须大于 shutdown 里等 inflight 的 30s
-    # 宿主网络：容器内 remoteAddress 才是真实客户端 IP。
-    # host 模式下 `ports` 映射无效（写了也不生效），端口由应用自己监听 PORT=8080
-    network_mode: host
-    environment:
-      TZ: Asia/Shanghai
-      MAX_UPLOAD_MB: "800"
-      KEEP_PER_PLATFORM: "5"
-      ADMIN_ALLOW_CIDR: "10.20.0.0/16"
-      NODE_ENV: production
-    volumes:
-      - /srv/online_exe/data:/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
+**仓库不提供 `docker-compose.yml`**，部署只有这一条命令：
+
+```bash
+docker run -d --name online-exe \
+  --network host \
+  --restart unless-stopped \
+  --stop-timeout 45 \
+  -e TZ=Asia/Shanghai -e PORT=8080 -e DATA_DIR=/data \
+  -e MAX_UPLOAD_MB=800 -e KEEP_PER_PLATFORM=5 \
+  -e ADMIN_ALLOW_CIDR=10.20.0.0/16 \
+  -v /srv/online_exe/data:/data \
+  --log-driver json-file --log-opt max-size=20m --log-opt max-file=3 \
+  online-exe:1.0.0
 ```
 
-`IMAGE_TAG` 走变量而不是写死：升级时改 `.env` 里的 `IMAGE_TAG=1.0.1`，`docker compose up -d` 完成替换。
+为什么不用 compose：`docker save` 只导出镜像，`docker-compose.yml` 是仓库文件，永远不会随 tar 到服务器。维护两套（compose 与 run）必然漂移，而实际交付路径只有「tar 拷进去 → load → run」这一条，所以只留一套。
 
-**为什么用 `network_mode: host`。** 见 4.8 的说明——默认 bridge + `ports` 映射在部分环境下会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 双双失真，而这俩恰好是本方案仅有的两道"谁能操作/谁传的"防线。
+| 参数 | 值 | 为什么 |
+|---|---|---|
+| `--network host` | — | 见 4.8：默认 bridge + `-p` 在部分环境下会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 双双失真，而这俩恰好是本方案仅有的两道"谁能操作/谁传的"防线 |
+| `--stop-timeout 45` | 45 秒 | 必须大于 shutdown 里等 inflight 的 30s；默认 10s 会被 SIGKILL 硬砍 |
+| `-v /srv/online_exe/data:/data` | — | 不挂卷 = `docker rm` 后版本记录全丢 |
+| `--restart unless-stopped` | — | 宿主机重启后自动拉起 |
+| `--log-driver json-file --log-opt …` | 20m × 3 | 容器日志默认无限增长，能在几个月内把磁盘写满——「莫名其妙磁盘满了」的常见来源 |
+| `-e ADMIN_ALLOW_CIDR` | 实例网段 | 填错管理页直接 403。**必须包含构建机网段**，否则 CI 上传被自己的防护挡掉；本地 WSL 调试一般填 `172.24.0.0/16` |
+
+升级 = 导入新 tag 后 `docker rm -f online-exe` 再跑同一条命令。数据在卷里，版本记录和包都不丢。
 
 host 模式的代价与对策：
 
@@ -1438,16 +1467,12 @@ host 模式的代价与对策：
 
 **如果运维坚持用 bridge**（比如统一网络规划），那必须做两件事：① 按 4.8 的验证命令实测源 IP；② 实测发现源 IP 是网关地址时，`ADMIN_ALLOW_CIDR` 要么留空，要么填网关网段——但那样等于没保护，此时应改为「靠上游防火墙限制 8080 的来源」，而不是靠应用层。
 
-`ADMIN_ALLOW_CIDR` 记得改成实际网段，填错管理页直接 403。**别忘了把构建机网段算进去**，否则 CI 上传会被自己的防护挡掉。
-
-`logging` 那两行别省。容器日志默认无限增长，能在几个月内把磁盘写满——这是「莫名其妙磁盘满了」的常见来源。
-
 ### 6.5 九个容器坑
 
 | # | 坑 | 现象 | 处置 |
 |---|---|---|---|
 | 1 | **数据没挂卷** | `docker rm` 后版本记录归零 | 必须 `-v /srv/online_exe/data:/data` |
-| 2 | **文件权限** | 上传报 `EACCES`，宿主机改不动文件 | 容器内 `node`（uid 1000），宿主机目录 `chown -R 1000:1000` |
+| 2 | **文件权限** | 容器起不来：`EACCES: permission denied, mkdir '/data/releases'` | 挂载目录属主不是 uid 1000。入口脚本会自动 `chown` 后降权；若挂载点在 Windows 盘 / NFS 则 chown 无效，改用命名卷或 ext4 路径 |
 | 3 | **大文件被掐断** | 传 400MB 上传到一半连接重置 | `server.requestTimeout = 0`（Node 默认 300 秒） |
 | 4 | **大文件被 413** | 若前置 Nginx，直接 413 | 宿主机 Nginx 的 `client_max_body_size` 默认 1MB |
 | 5 | **时区差 8 小时** | 页面时间和日志全是 UTC | `TZ=Asia/Shanghai` + 镜像内装 tzdata |
@@ -1516,7 +1541,7 @@ host 模式的代价与对策：
 | **管理页** | `/admin` | **B** | `views/admin.ejs`、`public/admin.css`、`public/admin.js`、`src/routes/pages/admin.js`、`src/routes/upload.js`、`src/routes/releases.js` | Chrome/Edge 内跑完上传→核对→撤回→删除，不跳页 |
 | **数据底座** | — | **A** | `src/semver.js`、`src/catalog/`、`src/storage/`、`src/routes/index.js`、`src/middleware/cidr.js` | `catalog` 六个方法签名不漂移 |
 | **运行时 + 横切** | — | **B** | `src/config.js`、`src/app.js`、`src/server.js`、`src/middleware/errors.js`、`src/routes/dto.js` | 进程不死、超时正确、错误格式统一 |
-| **部署** | — | **B** | `Dockerfile`、`docker-compose.yml`、`.dockerignore`、离线 `save/load` | 一条 `docker compose up -d` 起得来 |
+| **部署** | — | **B** | `Dockerfile`、`docker-entrypoint.sh`、`.dockerignore`、离线 `save/load` | 一条 `docker run` 起得来，忘 `chown` 也不 EACCES |
 | **公共样式** | — | 阶段 0 一起写 | `public/base.css`（重置 + 字体 + 顶部导航，约 60 行） | 冻结后不改，改要通知 |
 
 底座为什么这么对半分：A 拿的是「数据长什么样、怎么落盘」，B 拿的是「进程怎么活、响应长什么样、部署怎么起」。两边都不碰对方的文件，但各自的页面都能独立跑通。
@@ -1598,7 +1623,7 @@ host 模式的代价与对策：
 | **A 合计** | | **约 1380 行** |
 | B · 运行时 | config 60 + app 40 + server 60 + errors 50 + dto 40 | 250 |
 | B · 管理页 | pages/admin 130 + admin.ejs 200 + admin.js 70 + admin.css 110 + upload 260 + releases 150 | 920 |
-| B · 部署 | Dockerfile / compose / .dockerignore 80 + fixtures & 验收脚本 70 | 150 |
+| B · 部署 | Dockerfile / entrypoint / .dockerignore 110 + fixtures & 验收脚本 70 | 180 |
 | **B 合计** | | **约 1320 行** |
 
 两边差 60 行，可以忽略。**真正要盯的不是行数，是阻塞关系**：A 的 `catalog` 是 B 的依赖，A 停 B 就停。两条解耦措施已经在 7.4 里落地：
@@ -1688,7 +1713,7 @@ host 模式的代价与对策：
 **下面 6 条是硬伤用例，必须全部过**：
 
 36. **上传中途客户端断开，服务不退出**：`curl --limit-rate 1M` 传 400MB，传到一半 `kill` 掉 curl，再 `curl -v http://IP:8080/healthz` 必须 200；`docker logs` 里不能出现 `UnhandledPromiseRejection` / `uncaughtException`。**连做 10 次**，容器 `RestartCount` 必须还是 0。这条不通过就别上线
-37. **删除后同版本重传**：删除 `1.3.0/windows10-x64`，再传同一个版本号，必须 409；管理页「已删除」筛选里能看到墓碑记录
+37. **删除后同版本重传**：删除 `1.3.0/windows10-x64`，再传同一个版本号，**必须 201**（墓碑保留但不再挡重发），`id` 与原来一致、状态回到 `active`、`sha256` 是新内容；管理页「已删除」筛选里不再有它，默认列表里出现；再传一次（此时是在架状态）必须 409
 38. **8 个并发大包的空间预检**：把 `/data` 缩到只剩 2GB（临时挂一个小盘或 `--storage-opt` 限制），同时开 8 个 400MB 上传（合计 3.2GB，预留口径 3.5GB），预期是「部分 507、部分成功」，**不能出现全部通过、最后集体 ENOSPC，也不能让服务崩**
 39. **源 IP 真实性**：按 4.8 的命令从另一台内网机器访问，`remoteAddress` 必须是那台机器的真实 IP；同时确认新上传记录的 `uploaded_ip` 与之一致
 40. **续传不重复计数**：`curl -C -` 分三次续传同一个包，`stats.json` 里这个 id 的计数只 +1（若中途换过文件则允许 +2）
@@ -1738,7 +1763,7 @@ host 模式的代价与对策：
 1. **单包大小：已确认 300–400MB。** 据此定档 `MAX_UPLOAD_MB=800`、`KEEP_PER_PLATFORM=5`、数据盘 100GB，预算推导见 4.9。
 2. **内网有多少人要下载？** 十几个人，Express 直出完全够；上百人同时拉，再考虑前置 Nginx 托管静态文件。
 3. **服务端口 8080 是否被占？** 开工前确认。
-4. **内网 Docker / Compose 版本？** compose 用的是 v2 语法，需要 Docker Compose v2。
+4. **内网 Docker 版本？** 需要 Docker 20.10+（镜像用了 `HEALTHCHECK`、`ENTRYPOINT` 与 `--stop-timeout`）；不要求装 Compose。
 5. **宿主机有没有独立数据盘挂 `/srv/online_exe/data`？** 单包 400MB、保留 5 版需要约 16GB，加并发峰值与余量按 **100GB** 规划；只有根分区 60GB 时把 `KEEP_PER_PLATFORM` 降到 3。
 6. **两人各自能不能独立写服务端？** 能 → 按 7.3 页面竖切；有一人只会前端 → 退到 7.10 的横切方案。
 7. **管理页的来源网段是什么？** 填 `ADMIN_ALLOW_CIDR`，填错管理页直接 403；**构建机网段也要算进去**，否则 CI 上传 403。

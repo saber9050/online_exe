@@ -1,0 +1,114 @@
+/* 下载页样式。必须兼容 IE11：不用 CSS 变量、不用 Grid，卡片用 inline-block 平铺。 */
+
+.hero { padding: 34px 0 8px; }
+.hero h1 { font-size: 26px; margin: 0 0 6px; }
+.hero-sub { color: #5b6478; margin: 0 0 16px; }
+
+.summary {
+  background: #fff;
+  border: 1px solid #e6e9ef;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 8px;
+}
+.sum-item { margin-right: 6px; white-space: nowrap; }
+.sum-os { color: #8a93a6; margin-right: 6px; }
+.sum-item b { font-size: 16px; }
+.sep { color: #c9cfda; margin: 0 10px; }
+.star { color: #e67e22; font-style: normal; margin-left: 2px; }
+.mixed-note { color: #b26a00; font-size: 12px; margin: 6px 0 0; }
+
+.anchor-nav { margin: 16px 0 0; padding: 0; }
+.anchor-nav a {
+  display: inline-block;
+  padding: 7px 14px;
+  margin: 0 8px 8px 0;
+  background: #fff;
+  border: 1px solid #e6e9ef;
+  border-radius: 20px;
+  color: #3d4657;
+  font-size: 13px;
+}
+.anchor-nav a:hover { border-color: #2f6fed; color: #2f6fed; text-decoration: none; }
+
+/* OS 大类区块（Windows / macOS / Linux） */
+.family {
+  background: #fff;
+  border: 1px solid #e6e9ef;
+  border-radius: 10px;
+  padding: 20px 22px 22px;
+  margin-top: 18px;
+}
+.family-head { border-bottom: 1px solid #eef1f6; padding-bottom: 10px; }
+.family-head:after { content: ""; display: block; clear: both; }
+.family-head h2 { display: inline-block; font-size: 19px; margin: 0; }
+.family-count { float: right; color: #8a93a6; font-size: 12px; line-height: 30px; }
+
+/* 大类下的子组（Windows 7 / Windows 10·11），同大类内用虚线分隔 */
+.subgroup { padding: 14px 0 2px; }
+.subgroup + .subgroup { border-top: 1px dashed #e6e9ef; margin-top: 6px; }
+.subgroup-head:after { content: ""; display: block; clear: both; }
+.subgroup-head h3 { display: inline-block; font-size: 15px; font-weight: 600; margin: 0; color: #1f2430; }
+.subgroup-count { float: right; color: #8a93a6; font-size: 12px; line-height: 24px; }
+.platform-note { color: #8a93a6; font-size: 13px; margin: 6px 0 0; }
+
+/* 架构卡片 */
+.cards { margin-top: 4px; }
+.card {
+  display: inline-block;
+  vertical-align: top;
+  width: 300px;
+  margin: 14px 14px 0 0;
+  padding: 16px 18px;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.card-empty { background: #f7f8fa; }
+.card-top { margin-bottom: 8px; }
+.card-top:after { content: ""; display: block; clear: both; }
+.card-top .arch { display: inline-block; font-weight: 600; color: #1f2430; }
+.card-top .ver { float: right; color: #2f6fed; font-weight: 700; }
+.card-badges { min-height: 20px; margin-bottom: 4px; }
+.card-meta { color: #5b6478; font-size: 13px; margin: 2px 0; }
+.card .btn { display: block; margin-top: 12px; }
+
+.tip {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: #fff8e8;
+  border: 1px solid #f2e0b5;
+  border-radius: 6px;
+  color: #8a6116;
+  font-size: 13px;
+}
+
+/* 版本历史 */
+.history { margin-top: 26px; }
+.history-head { margin-bottom: 10px; }
+.history-head h2 { display: inline-block; font-size: 18px; margin: 0 10px 0 0; }
+
+/* 版本历史的 OS 分类标签：纯链接，无 JS 也能切换 */
+.tabs { margin: 0 0 10px; }
+.tabs:after { content: ""; display: block; clear: both; }
+.tab {
+  display: inline-block;
+  padding: 6px 14px;
+  margin: 0 8px 8px 0;
+  border: 1px solid #e6e9ef;
+  border-radius: 18px;
+  background: #fff;
+  color: #3d4657;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.tab:hover { border-color: #2f6fed; color: #2f6fed; text-decoration: none; }
+.tab.is-active { background: #2f6fed; border-color: #2f6fed; color: #fff; font-weight: 600; }
+.tab-count { margin-left: 6px; font-size: 12px; color: #8a93a6; }
+.tab.is-active .tab-count { color: #dbe5fb; }
+
+.row-yanked td { color: #a0a8b8; }
+
+/* UA 自动定位到当前平台区块时给一点视觉提示 */
+.ua-target { border-color: #b9ccf5; box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.08); }
+.ua-sub .subgroup-head h3 { color: #2f6fed; }

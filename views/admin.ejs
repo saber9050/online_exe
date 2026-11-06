@@ -1,0 +1,203 @@
+<%- include('partials/head', { title: title, page: page, pageCss: pageCss }) %>
+
+<div class="app">
+<main class="wrap">
+
+  <section class="statusbar">
+    <div class="stat">
+      <span class="stat-label">磁盘可用</span>
+      <b><%= fmtSize(summary.free) %></b>
+      <span class="dim">/ 共 <%= fmtSize(summary.total) %></span>
+    </div>
+    <div class="stat"><span class="stat-label">版本总数</span><b id="stat-versions"><%= summary.totalVersions %></b></div>
+    <div class="stat"><span class="stat-label">占用合计</span><b id="stat-occupied" data-bytes="<%= summary.occupied %>"><%= fmtSize(summary.occupied) %></b></div>
+    <div class="stat">
+      <span class="stat-label">孤儿文件</span>
+      <b id="orphan-count"><%= summary.orphan.count %> 个</b>
+      <span class="dim" id="orphan-bytes">/ <%= fmtSize(summary.orphan.bytes) %></span>
+      <button type="button" class="btn btn-sm" id="orphan-toggle">查看</button>
+    </div>
+  </section>
+
+  <%# 孤儿文件面板：默认折叠，点「查看」由 admin.js 拉 GET /api/orphans 填充。
+      为什么懒加载而不是服务端直出：孤儿可能有几十上百条，塞进首屏 HTML 只是拖慢打开速度，
+      而这块内容 99% 的时间没人看。 %>
+  <section class="panel orphan-panel" id="orphan-panel" hidden>
+    <div class="panel-head">
+      <h2>孤儿文件</h2>
+      <span class="dim">磁盘上有、版本记录里没有的文件。启动对账把它们移入 <code>data/orphan/</code> 待人工确认，不会自动删除。</span>
+      <button type="button" class="btn btn-sm btn-danger" id="orphan-clear">全部清理</button>
+    </div>
+    <div id="orphan-body"><p class="empty">加载中…</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>上传新版本</h2>
+      <span class="dim">单包上限 <%= maxUploadMb %>MB · 仅 8 组合白名单</span>
+    </div>
+
+    <form id="upload-form" class="upload-form" autocomplete="off">
+      <div class="form-row">
+        <label class="field">
+          <span>版本号</span>
+          <input type="text" name="version" id="f-version" placeholder="1.3.0" required>
+        </label>
+        <label class="field">
+          <span>平台</span>
+          <select name="platform" id="f-platform" required>
+            <% groups.forEach(function(g){ %><option value="<%= g.id %>"><%= g.label %></option><% }) %>
+          </select>
+        </label>
+        <label class="field">
+          <span>架构</span>
+          <select name="arch" id="f-arch" required></select>
+        </label>
+        <span class="channel-tag" id="channel-tag">正式</span>
+      </div>
+
+      <p class="field-hint" id="coverage">填写版本号后显示覆盖度</p>
+
+      <label class="field field-full">
+        <span>更新说明</span>
+        <textarea name="changelog" id="f-changelog" rows="2" placeholder="修复登录闪退；启动速度优化 30%"></textarea>
+      </label>
+
+      <div class="dropzone" id="dropzone">
+        <b>拖拽产物到此处</b>
+        <span>或点击选择文件</span>
+        <div class="dz-file" id="dz-file"></div>
+      </div>
+      <input type="file" id="f-file" hidden>
+
+      <div class="progress" id="progress-wrap"><div class="bar" id="progress-bar"></div></div>
+      <div class="upload-meta" id="upload-meta"></div>
+
+      <div class="form-actions">
+        <button type="submit" class="btn" id="submit-btn">开始上传</button>
+        <span class="form-tip" id="form-tip"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>版本列表</h2>
+      <form class="filters" method="get" action="/admin" id="filter-form">
+        <select name="platform">
+          <option value="all" <%= platform === 'all' ? 'selected' : '' %>>全部平台</option>
+          <% groups.forEach(function(g){ %><option value="<%= g.id %>" <%= platform === g.id ? 'selected' : '' %>><%= g.label %></option><% }) %>
+        </select>
+        <select name="status">
+          <option value="all" <%= status === 'all' ? 'selected' : '' %>>全部（不含已删除）</option>
+          <option value="stable" <%= status === 'stable' ? 'selected' : '' %>>正式</option>
+          <option value="prerelease" <%= status === 'prerelease' ? 'selected' : '' %>>预发布</option>
+          <option value="yanked" <%= status === 'yanked' ? 'selected' : '' %>>已撤回</option>
+          <option value="missing" <%= status === 'missing' ? 'selected' : '' %>>缺文件</option>
+          <option value="deleted" <%= status === 'deleted' ? 'selected' : '' %>>已删除</option>
+        </select>
+        <button type="submit" class="btn btn-sm">筛选</button>
+      </form>
+    </div>
+
+    <% if (rows.length === 0) { %>
+      <p class="empty">还没有任何版本。</p>
+    <% } else { %>
+    <div class="table-wrap" id="list-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>版本</th><th>平台</th><th>架构</th><th>大小</th><th>上传时间</th><th>状态</th><th>下载</th><th>操作</th></tr>
+        </thead>
+        <tbody id="list-body">
+          <% rows.forEach(function(r){ %>
+          <%# data-* 是给前端做「局部更新 + 前端筛选」用的：
+              撤回/恢复/删除不再整页刷新，切筛选也不再走导航，只在这里切换显隐。
+              所以 status / missing / prerelease / platform / size 都得带到 DOM 上 %>
+          <tr data-id="<%= r.id %>"
+              data-status="<%= r.status %>"
+              data-missing="<%= r.file_missing ? '1' : '0' %>"
+              data-prerelease="<%= r.is_prerelease ? '1' : '0' %>"
+              data-platform="<%= r.platform %>"
+              data-size="<%= r.size %>"
+              data-version="<%= r.version %>"
+              data-combo="<%= r.comboLabel %>"
+              class="<%= r.file_missing ? 'row-missing ' : '' %><%= visibleIds.has(r.id) ? '' : 'row-hidden' %>">
+            <td><b><%= r.version %></b> <span class="tag"><%= r.is_prerelease ? 'Beta' : '正式' %></span></td>
+            <td><%= r.platformLabel %></td>
+            <td><%= r.arch %></td>
+            <td><%= fmtSize(r.size) %></td>
+            <td>
+              <%= fmtDate(r.uploaded_at) %>
+              <div class="dim small"><%= r.uploaded_ip || '' %></div>
+            </td>
+            <td class="cell-status">
+              <% if (r.status === 'deleted') { %><span class="badge">已删除</span><% } %>
+              <% if (r.status === 'yanked') { %><span class="badge">已撤回</span><% } %>
+              <% if (r.status === 'active') { %><span class="badge badge-ok">在架</span><% } %>
+              <% if (r.file_missing) { %><span class="badge badge-danger">缺文件</span><% } %>
+            </td>
+            <td><%= r.downloads %></td>
+            <td class="ops">
+              <%# 按钮按「status × file_missing」两个维度给，不给所有行同一套。
+                  两个维度是正交的：status 是发版人的意图，file_missing 是磁盘事实。 %>
+              <% if (r.status === 'deleted') { %>
+                <span class="dim">—</span>
+              <% } else { %>
+                <% if (r.file_missing) { %>
+                  <button type="button" class="btn btn-sm" data-action="reupload"
+                    data-version="<%= r.version %>" data-platform="<%= r.platform %>" data-arch="<%= r.arch %>">重新上传</button>
+                <% } %>
+                <% if (r.status === 'active' && !r.file_missing) { %>
+                  <button type="button" class="btn btn-sm" data-action="yank" data-id="<%= r.id %>">撤回</button>
+                <% } %>
+                <% if (r.status === 'yanked') { %>
+                  <% if (r.file_missing) { %>
+                    <%# 文件没了还能「恢复」，只会让下载页多出一条点了就 404 的链接。
+                        服务端会 409 兜住，但让用户点了才失败属于交互缺陷，所以这里直接禁用并说明原因。 %>
+                    <button type="button" class="btn btn-sm" disabled
+                      title="文件缺失：请先用「重新上传」补齐同版本文件，再恢复">恢复</button>
+                  <% } else { %>
+                    <button type="button" class="btn btn-sm" data-action="restore" data-id="<%= r.id %>">恢复</button>
+                  <% } %>
+                <% } %>
+                <button type="button" class="btn btn-sm btn-danger" data-action="delete"
+                  data-id="<%= r.id %>" data-version="<%= r.version %>"
+                  data-combo="<%= r.comboLabel %>">删除</button>
+              <% } %>
+            </td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <%# 前端筛选后可能一行都不剩，这个占位由 admin.js 控制显隐（服务端不再重渲染列表）。
+        初始状态也要对：当前筛选本来就为空时直接显示，避免 JS 未执行时只剩表头 %>
+    <p class="empty" id="list-empty" <%= visibleIds.size === 0 ? '' : 'hidden' %>>当前筛选下没有版本。</p>
+    <% } %>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>清理建议</h2>
+      <span class="dim">每个组合保留最近 <%= keepPerPlatform %> 个版本，仅列出、不自动删除</span>
+    </div>
+    <% if (suggestions.length === 0) { %>
+      <p class="empty">暂无超出保留数量的旧包。</p>
+    <% } else { %>
+      <% suggestions.forEach(function(s){ %>
+        <div class="suggestion">
+          <div><b><%= s.combo %></b> 可清理 <%= s.extra.length %> 个，共 <b><%= fmtSize(s.bytes) %></b></div>
+          <div class="dim small"><% s.extra.forEach(function(e, i){ %><% if (i > 0) { %> · <% } %><%= e.version %><% }) %></div>
+        </div>
+      <% }) %>
+    <% } %>
+  </section>
+
+</main>
+</div>
+
+<script>
+  window.__PLATFORMS__ = <%- JSON.stringify(groups.map(function(g){ return { id: g.id, label: g.label, arches: g.arches }; })) %>;
+  window.__COVERAGE__ = <%- JSON.stringify(coverage) %>;
+</script>
+<%- include('partials/foot', { page: page, pageScript: pageScript }) %>
