@@ -317,14 +317,47 @@ async function main() {
   const delList = await req(A.url, '/api/releases?status=deleted')
   check('status=deleted 能查到墓碑', delList.body.releases.some((r) => r.id === id1))
 
-  // 删除后同版本重传必须 409（版本号不可变）
+  // 删除后同版本重传：允许重新发布（墓碑不再挡重发）
+  // 语义：删除 = 这个版本作废、文件没了；既然东西没了，就不该再拿它挡住重新发布
+  const rePkg = makeBytes(2048, 'n')
   const reup = await upload(A.url, {
     version: '1.3.0',
     platform: 'windows10',
     arch: 'x64',
-    bytes: pkg,
+    bytes: rePkg,
   })
-  check('删除后同版本重传 → 409（墓碑挡住不可变）', reup.status === 409, JSON.stringify(reup.body))
+  check('删除后同版本重传 → 201（墓碑不再阻止重发）', reup.status === 201, JSON.stringify(reup.body))
+  check('重传沿用原 id（下载计数不归零）', reup.body?.id === id1, `${reup.body?.id} vs ${id1}`)
+  check('重传后状态回到 active', reup.body?.status === 'active')
+  check('重传后 sha256 是新内容的', reup.body?.sha256 === sha256(rePkg))
+  check(
+    '重传后文件重新落盘',
+    Boolean(await fs.stat(finalPath).catch(() => null)),
+  )
+
+  const delListAfter = await req(A.url, '/api/releases?status=deleted')
+  check('重传后不再出现在「已删除」筛选里', !delListAfter.body.releases.some((r) => r.id === id1))
+
+  const allAfterReup = await req(A.url, '/api/releases')
+  check(
+    '重传后回到默认列表且为在架',
+    allAfterReup.body.releases.some((r) => r.id === id1 && r.status === 'active'),
+  )
+
+  // 只放宽了「墓碑」这一种，在架版本仍然不允许覆盖 —— 否则同 URL 换内容防不住
+  const dupAgain = await upload(A.url, {
+    version: '1.3.0',
+    platform: 'windows10',
+    arch: 'x64',
+    bytes: makeBytes(1024, 'q'),
+  })
+  check('在架版本重复上传仍 409（没把口子开太大）', dupAgain.status === 409, JSON.stringify(dupAgain.body))
+
+  // 同版本号可能换内容，下载侧不能再给 immutable，否则客户端一年不回头
+  const dl = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
+  const cc = dl.headers.get('cache-control') || ''
+  await dl.arrayBuffer()
+  check('下载响应 Cache-Control 改为 no-cache（保留 ETag 协商）', cc.includes('no-cache'), cc)
 
   // ════════════════════════════════════════════════════════════════
   // 场景三：file_missing 记录可重传且沿用原 id（需重启触发对账）

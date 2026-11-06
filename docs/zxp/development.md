@@ -45,7 +45,7 @@
 | 4 | `src/middleware/errors.js` | 30 | 404 + 按 `err.status` 输出统一错误 | 报错格式不统一，前端解析炸 |
 | 5 | `src/routes/dto.js` | 29 | 磁盘结构 → HTTP 结构映射 | 磁盘 JSON 被响应格式污染 |
 | 6 | `src/routes/upload.js` | 330 | busboy 流式上传、查重、并发、空间预检 | 内存爆 / 进程被未捕获异常打死 |
-| 7 | `src/routes/releases.js` | 233 | 列表筛选、撤回/恢复、墓碑、孤儿接口 | 版本不可变被击穿 |
+| 7 | `src/routes/releases.js` | 233 | 列表筛选、撤回/恢复、墓碑、孤儿接口 | 在架版本被覆盖 / 墓碑挡住重发 |
 | 8 | `src/catalog/orphan.js` | 126 | 孤儿文件列出/单删/清空 + 路径逃逸防护 | `?path=../` 能把版本库删掉 |
 | 9 | `src/routes/pages/admin.js` | 99 | 管理页数据装配 | 状态条数字不对、按钮给错 |
 | 10 | `views/admin.ejs` | 188 | 三段式页面骨架 + 孤儿面板 | IE 打开一片空白 |
@@ -276,7 +276,7 @@ receiving ──bb.close──→ committing ──成功──→ done
 | 步 | 动作 | 关键点 |
 |---|---|---|
 | 1 | `parseVersion(query.version)` + 白名单校验 | 不需要读 body；`parseVersion` 内部已剥 `v` |
-| 2 | **同步块**：`catalog.get` 查重 → `inflight.has` → `inflight.set` | 中间不能有 `await`，否则不原子 |
+| 2 | **同步块**：`catalog.get` 查重（判据 `isVersionTaken()`，见 §6.3）→ `inflight.has` → `inflight.set` | 中间不能有 `await`，否则不原子 |
 | 3 | `freeBytes()`（5s 缓存）+ `tryReserve(Content-Length)` | 可用 − 已预留 < `1.1 × CL` → `507` |
 | 4 | `storage.ensureDir()` | 失败 → 释放占位 + 额度 |
 | 5 | 建 busboy，挂 8 个事件 | 见 §5.5 |
@@ -424,7 +424,7 @@ Get-ChildItem -Recurse F:\tmp\oe-test\releases -Filter *.tmp
 
 `platform` 参数：`all` 或 4 个平台 id 之一。
 
-**已知缺口**：未知 `status` 值不会落进任何分支，结果等价于「不过滤」，连墓碑一起返回（见 §10 缺口 3）。
+`status` 走白名单查表：非法值在接口层返回 400（文案会列出可选值），页面层回落成 `all`。别再用 if/else 链——链式写法对未知值落不进任何分支，等于完全不过滤，会把墓碑一起吐出去。
 
 ### 6.2 撤回 / 恢复
 
@@ -448,9 +448,22 @@ catalog.apply(record)
 
 1. **`object_key` 保留**，不要置空——置空后查不出「这条记录当初存在哪个路径」
 2. **`file_missing = false`**：墓碑不是「文件意外丢失」，是「文件被主动删除」
-3. **对账必须跳过 `status === 'deleted'`**（A 的 `persist.reconcile`）。否则重启对账发现「记录在、文件没了」→ 置 `file_missing = true` → 查重条件 `file_missing !== true` 放行 → **墓碑的不可变保护当场失效**
+3. **对账必须跳过 `status === 'deleted'`**（A 的 `persist.reconcile`）。否则重启对账发现「记录在、文件没了」，会给墓碑打上 `file_missing = true` 红标，管理页看着像丢文件事故
 
-墓碑的意义：删掉再以同版本号传新包，下载 URL 不变而内容变了，`Cache-Control: immutable` 和「版本号不可变」同时击穿。有了墓碑，查重天然拦住（`file_missing` 是 false → 409）。
+**墓碑不阻止重新发布。** 删除的语义是「这个版本作废、东西没了」；既然文件已经删了，就不该再用「已存在」拦住重传同一个版本号。查重判据统一在 `isVersionTaken()`：
+
+```js
+function isVersionTaken(rec) {
+  if (!rec) return false
+  if (rec.file_missing === true) return false   // 记录在、文件没了 → 补传
+  if (rec.status === 'deleted') return false    // 墓碑 → 删掉重发
+  return true                                   // active / yanked → 409
+}
+```
+
+入口查重和队列内二次查重**必须调同一个函数**，写两份必然漂移。
+
+代价与配套：同一个 `/dl/{version}/{combo}` 在不同时间可能对应不同内容，所以下载响应不能再设 `Cache-Control: immutable`，改成 `no-cache` + ETag（内容没变就 304）。这条在 A 的 `src/routes/download.js` 里。
 
 ### 6.4 状态 × 文件事实 → 按钮矩阵
 

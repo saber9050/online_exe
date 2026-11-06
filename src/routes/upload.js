@@ -62,6 +62,28 @@ function releaseReserve(need) {
   if (need > 0) reservedBytes = Math.max(0, reservedBytes - need)
 }
 
+/**
+ * 同一个版本号还能不能再传。
+ *
+ * 只有「这条记录还在用」时才拦，两种状态放行：
+ *   ① file_missing === true —— 记录在、文件丢了，允许补齐（沿用原 id，下载计数不归零）
+ *   ② status === 'deleted'  —— 墓碑。删除的语义是「这个版本作废、东西没了」，
+ *      既然文件已经删了，就不该再拿它挡住重新发布；否则用户只能改版本号来绕，
+ *      而他要发的本来就是同一个版本。
+ *
+ * 在架（active）和已撤回（yanked）仍然一律 409：这两种状态下文件还在，
+ * 覆盖等于「同一个 URL 换内容」，客户端缓存和版本追溯都会失效。
+ *
+ * @param {any} rec
+ * @returns {boolean} true = 已被占用，拒绝上传
+ */
+function isVersionTaken(rec) {
+  if (!rec) return false
+  if (rec.file_missing === true) return false
+  if (rec.status === 'deleted') return false
+  return true
+}
+
 function buildRecord({ id, parsed, platform, arch, filename, size, sha256, changelog, ip }) {
   return {
     id,
@@ -103,7 +125,7 @@ export async function uploadHandler(req, res) {
 
   // 这一段同步执行，查重 + 占位天然原子
   const existing = catalog.get(platform, arch, version)
-  if (existing && existing.file_missing !== true) {
+  if (isVersionTaken(existing)) {
     return res.status(409).json({
       error: `${version} / ${platform} / ${arch} 已存在，请改用新版本号`,
       existing: toReleaseDto(existing),
@@ -260,9 +282,9 @@ export async function uploadHandler(req, res) {
       const tmp = tmpPath
 
       const rec = await enqueueWrite(async () => {
-        // 串行段内再次查重
+        // 串行段内再次查重（判据与入口共用 isVersionTaken，别写两份）
         const cur = catalog.get(platform, arch, version)
-        if (cur && cur.file_missing !== true) throw new Error('DUPLICATE')
+        if (isVersionTaken(cur)) throw new Error('DUPLICATE')
 
         await storage.ensureDir(storage.dirFor(version, platform, arch))
         await fs.rename(tmp, finalPath)

@@ -547,11 +547,11 @@ function enqueueWrite(fn) {
 |---|---|
 | 版本格式 | 严格 semver：`MAJOR.MINOR.PATCH[-prerelease]`，允许前缀 `v`，**但入库前必须去掉**（见下） |
 | 唯一键 | **`(platform, arch, version)`** 组合唯一，`channel` 已从唯一键移除 |
-| **严格不可变** | 同版本号重复上传 → 一律 `409`（仅 `file_missing === true` 的记录除外，见下），**不提供覆盖**。传错了就发 `1.3.1` |
+| **同版本号不覆盖** | 在架（`active`）与已撤回（`yanked`）的记录**重复上传一律 409**，不提供覆盖，传错了就发 `1.3.1`。两种例外放行：`file_missing === true`（补文件）、`status === 'deleted'`（删掉重发），见下 |
 | 排序 | `major → minor → patch` 降序，正式版优先于预发布 |
 | 预发布回落 | 某平台只有预发布版本时，`latest` 回落到最高的预发布并标 Beta |
 | 撤回 | `status='yanked'`，文件保留，列表灰显，直链仍可下 |
-| 删除 | `DELETE /api/releases/:id`，前端二次确认（弹框写明版本 + 平台 + 不可恢复）；**只删文件、记录改墓碑**，见下 |
+| 删除 | `DELETE /api/releases/:id`，前端二次确认（弹框写明版本 + 平台 + 不可恢复）；**只删文件、记录改墓碑**；删除后同版本号**可以重新发布**，见下 |
 | 渠道 | **由 `is_prerelease` 表达**：`false` = stable，`true` = beta，没有独立字段 |
 
 各平台独立取最新：**Win7 停 1.2.0、Win10 已到 1.4.0 是正常状态**，不要求 Win7 追上 Win10。
@@ -564,56 +564,61 @@ function enqueueWrite(fn) {
 
 - 不归一化 → `v1.3.0` 和 `1.3.0` 是两条独立记录、两个目录、下载页两行一样的版本号
 - `major/minor/patch` 拆分时也要先剥前缀，否则 `v1` 解析失败
-- 下载 URL `/dl/v1.3.0/...` 与 `/dl/1.3.0/...` 指向两份不同内容，`immutable` 缓存各自生效
+- 下载 URL `/dl/v1.3.0/...` 与 `/dl/1.3.0/...` 指向两份不同内容，缓存各自独立
 
 所以：**入口处 `const version = raw.replace(/^v/i, '')`，之后所有环节（唯一键、路径、JSON、URL）一律用归一化后的值**。原始输入只写进日志。
 
-#### 删除是「墓碑」，不是物理消失
+#### 删除是「墓碑」，但墓碑不阻止重新发布
 
-`DELETE` 不能真删记录 + 真删文件。那会留下一个漏洞：**删掉再以同一版本号传新包，内容就变了，而下载 URL 没变**——这正好击穿 4.6 的 `Cache-Control: immutable` 和本节「版本号不可变」的底线。用户缓存了旧 `1.3.0`，永远看不到新包，报障时谁也说不清。
-
-改成墓碑：
+`DELETE` 不真删记录：文件立即从磁盘删除，记录保留，`status` 置 `deleted`，`object_key` 留着（指向已不存在的文件）。
 
 ```js
 // DELETE /api/releases/:id
-await fs.unlink(storage.abs(rel.object_key)).catch(() => {})
+await storage.remove(rel.object_key)
 rel.status = 'deleted'
 rel.file_missing = false      // 墓碑不是「文件意外丢失」，是「文件被主动删除」，别混淆
-// 保留 id / version / platform / arch / object_key，只清掉可回收字段
 ```
 
-- 记录**不删**，`status` 置 `deleted`，`object_key` 保留（指向已不存在的文件）
-- 管理页默认不显示墓碑行，筛选项「已删除」可查
-- 查重逻辑天然拦住：`existing && existing.file_missing !== true` → 409，墓碑也会命中
+- 管理页默认不显示墓碑行，筛选项「已删除」可查——留痕用：什么时候删过哪个版本，事后还能翻到
 - `latest()` 只认 `status === 'active'`，墓碑自动排除
-- **对账必须跳过墓碑**。否则重启时对账发现「记录在、文件没了」，会把墓碑标成 `file_missing = true`，查重条件随即放行——不可变保护被自己绕开了。见 4.0.2
-- 墓碑占的空间可以忽略（几百字节），换来不可变性不会被绕过
+- **对账必须跳过墓碑**。否则重启对账发现「记录在、文件没了」，会把墓碑标成 `file_missing = true`，页面冒出红标，看着像丢文件事故。见 4.0.2
+- **墓碑不挡重发**：删除的语义是「这个版本作废、东西没了」。既然文件已经删了，就不该再用「已存在」拦住重新上传同一个版本号
 
-#### `file_missing` 记录的重传例外
+#### 允许重传的两种情况
 
-`file_missing === true` 表示「记录在、文件没了」（对账发现）。如果严格按不可变规则挡住同版本上传，用户就永远修不好这条记录——他必须先找到记录、删掉、再重传。
-
-所以查重逻辑要放行这一种情况：
+查重只看一件事：这条记录还在不在用。
 
 ```js
-const existing = catalog.get(key)
-if (existing && existing.file_missing !== true) {
-  return res.status(409).json({ error: '该版本已存在，请改用新版本号' })
+// 返回 true = 已被占用，拒绝上传
+function isVersionTaken(rec) {
+  if (!rec) return false
+  if (rec.file_missing === true) return false   // 记录在、文件没了 → 补传
+  if (rec.status === 'deleted') return false    // 墓碑 → 删掉后重新发布
+  return true                                   // active / yanked → 409
 }
-// 文件缺失的记录：允许重传补齐
 ```
 
-**重传必须沿用原 `id`。** `stats.json` 的 key 就是 `id`，`id` 换了计数必然对不上，除非再写一段迁移逻辑。
+| 情况 | 为什么放行 |
+|---|---|
+| `file_missing === true` | 否则用户永远修不好这条记录：必须先删再传，多一步且容易忘 |
+| `status === 'deleted'` | 删除后想原样重发同一版本；逼他改版本号只会产出「1.3.0 与 1.3.0-fix 并存」这种垃圾版本号 |
 
-改为 `buildRecord({ id: existing?.id ?? newId(), ... })`。同一条版本记录从头到尾只有一个 `id`，下载计数、`uploaded_at` 之外的元数据都自然延续。
+**重传必须沿用原 `id`。** `stats.json` 的 key 就是 `id`，换了计数必然对不上。`buildRecord({ id: existing?.id ?? newId(), ... })` 保证同一条版本记录只有一个 `id`，下载计数连续。
 
-注意墓碑（`status === 'deleted'`）**不适用**这个例外——它的 `file_missing` 是 `false`，会正常命中 409。删掉就是删掉了，想再发就换版本号。
+在架（`active`）与已撤回（`yanked`）仍然 409：这两种状态下文件还在，覆盖等于「同一个 URL 换内容」。所以要改内容，路径只有一条——先删，再传。
 
-#### 为什么不支持覆盖
+#### 下载缓存从 immutable 改成 no-cache
 
-允许覆盖同版本，跟下载侧的 `Cache-Control: immutable` 是**直接冲突**的：浏览器缓存了 `/dl/1.3.0/windows10-x64` 之后一年内不再发请求，包覆盖了也拿不到新的，用户只会说「我下了但程序没变」，极难排查。
+允许「删除后重发同一版本号」的直接后果：`/dl/1.3.0/windows10-x64` 在不同时间可能对应不同内容。
 
-两条路：给 URL 加内容指纹，或者禁止覆盖。选了后者，因为**版本号不可变是发版系统的底线**——同一个 `1.3.0` 在不同时间对应不同内容，会让「用户报的问题到底对应哪个二进制」永远说不清。
+原方案给它设 `Cache-Control: public, max-age=31536000, immutable`，前提正是「版本号不可变」。现在这个前提破了，缓存策略必须同步改，否则用户会「下了但程序没变」，且从现象上根本查不到原因：
+
+```js
+res.setHeader('ETag', `"${rel.sha256}"`)            // 内容指纹，没变就 304
+res.setHeader('Cache-Control', 'public, no-cache')  // 可以存，但每次必须回源校验
+```
+
+代价是每次下载多一个条件请求（未变化时返回 304，几乎零带宽）；收益是用户永远拿到当前那一份。内网千兆、十几个人，这点开销可以忽略。
 
 #### latest 的选取逻辑
 
@@ -914,7 +919,7 @@ if (!PLATFORM_ARCH_SET.has(`${platform}-${arch}`)) return res.status(404).send('
 |---|---|
 | 断点续传 | `res.sendFile(absPath)`，底层 `send` 库原生支持 `Range` / `If-Range` |
 | 自定义 ETag | `sendFile(p, { etag: false, lastModified: false })` + 手动 `res.setHeader('ETag', '"' + sha256 + '"')` |
-| 缓存 | `Cache-Control: public, max-age=31536000, immutable` |
+| 缓存 | `Cache-Control: public, no-cache` + 内容 sha256 做 ETag（每次回源校验，未变返回 304） |
 | 文件名 | `Content-Disposition: attachment; filename="<ASCII 回退>"; filename*=UTF-8''<encodeURIComponent>` |
 | 计数 | 内存累加，30s 落盘到 `stats.json`；**只在非 Range 请求或 Range 起点为 0 时 +1**，避免断点续传重复计数 |
 | 撤回版本 | `yanked` 仍可下载，保证老用户回滚不断链 |
@@ -933,12 +938,12 @@ res.setHeader('Content-Disposition',
 
 **不要再用 `req.fresh` 做计数判断**。`req.fresh` 依赖 `res` 上已经设置了 `ETag` 才能比较，而计数发生在 `sendFile` 之前、响应头还没设，此时它恒为 `false`；等 `sendFile` 之后再判断，响应已经发出去了。所以固定为「到达服务端的请求都计数」，语义是「用户点了一次下载」，这个数字对发版场景够用，不要写那种实际不生效的优化。
 
-**计数的口径要写准，别自欺欺人。** 用「304 也 +1」来弥补缓存命中是无效的——在 `immutable` 生效的场景下浏览器**根本不会发请求**，连 304 都没有。所以这个数字的真实含义是：
+**计数的口径要写准，别自欺欺人。** 用 `no-cache` 之后浏览器每次都会回源校验，所以这个数字的含义是：
 
-- 包含：首次下载、强制刷新、直接用 `curl` 拉
-- 不包含：`immutable` 有效期内的重复下载（浏览器本地消化，服务端零感知）
+- 包含：首次下载、强制刷新、直接用 `curl` 拉，以及**本地已缓存但回来校验的那次**（可能直接 304，没有正文）
+- 不包含：浏览器根本没发起请求的场景（例如下载被拦、用户没点）
 
-想让数字接近真实分发量，只有给 URL 加内容指纹或去掉 `immutable`。当前场景（内网、人数少、只想看「这个包有没有人下」）不值得为此付出代价，**接受这个口径并在页面上标注「统计口径：服务端收到的下载请求」**即可。
+想让数字严格等于「分发出去的包数」，只能靠 URL 加内容指纹或客户端上报，当前场景（内网、人数少、只想看「这个包有没有人下」）不值得，**接受这个口径并在页面上标注「统计口径：服务端收到的下载请求」**即可。
 
 另一个必然踩到的点：**断点续传会发多个 Range 请求**，一次下载可能变成好几次计数。所以计数要加条件——`Range` 头缺失，或 `Range` 起点是 0（`bytes=0-`），才算一次新下载：
 
@@ -952,7 +957,7 @@ if (isNewDownload) stats.inc(rel.id)
 
 我们只认内容哈希：关掉 `lastModified`，ETag 用 sha256。缓存语义收敛成一个判据，不会互相打架。
 
-**`immutable` 成立的前提是版本号不可变**。因为不支持覆盖（见 4.4），同一个 URL 永远对应同一份内容，这个缓存头才敢设一年。
+**为什么不用 `immutable`**：它成立的前提是「同一个 URL 永远对应同一份内容」。而 4.4 允许「删除后重发同一版本号」，这个前提已经不存在了——真要设一年不可变，用户删了重发之后会一直拿到旧包，报障时只能靠猜。所以退一步：`no-cache` + ETag 协商，未变化时仍是 304，只是多一个往返。
 
 ```js
 export async function download(req, res, next) {
@@ -985,7 +990,8 @@ export async function download(req, res, next) {
   res.setHeader('Content-Disposition',
     `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(rel.filename)}`)
   res.setHeader('ETag', `"${rel.sha256}"`)            // 内容哈希
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  res.setHeader('ETag', `"${rel.sha256}"`)
+  res.setHeader('Cache-Control', 'public, no-cache')
 
   res.sendFile(abs, {
     etag: false,          // 别让 send 用 mtime 生成 ETag
@@ -1057,7 +1063,7 @@ views/
 
 两页各 include 一次，十行代码的事，不值得为它引一个依赖。
 
-**静态资源不要设 `immutable`**。`/dl/` 下的包有版本号做指纹，可以缓存一年；但 `base.css`、`download.css`、`admin.js` 没有指纹，设长了改版后用户会一直拿旧文件，表现是「改了样式但没生效」。让它们走默认的 `ETag + 协商缓存`（304）就够了。真要长缓存，得给文件名加内容哈希，那是另一个工程量。
+**静态资源不要设长缓存**。`base.css`、`download.css`、`admin.js` 没有内容指纹，设长了改版后用户会一直拿旧文件，表现是「改了样式但没生效」。让它们走默认的 `ETag + 协商缓存`（304）就够了。真要长缓存，得给文件名加内容哈希，那是另一个工程量。`/dl/` 下的包也不设长缓存了，理由见 4.6。
 
 **版本历史表格默认只渲染最近 20 条**，其余折叠展开。IE11 渲染几百行 `<tr>` 会明显卡顿，而这个页面是给人「找某个旧版本」用的，全量渲染没有意义。
 
@@ -1281,7 +1287,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 |---|---|
 | 误删版本 | 删除走二次确认弹框（列出 版本 + 平台 + 架构，写明不可恢复、版本号作废，并提示「只想下架用撤回」）；默认只提供「撤回」，物理删除是二级操作 |
 | 误覆盖版本 | 已从机制上消除：版本号严格不可变，同版本一律 409（`file_missing` 记录例外） |
-| **删除后重传击穿不可变** | 删除改为墓碑：`status='deleted'` 保留记录，查重照样 409。否则"删了再传"等于给同一个 URL 换了内容，`immutable` 缓存和版本追溯同时失效 |
+| 删除后重传换了内容 | 删除改为墓碑（留痕），但**不阻止重发同版本号**；同时把下载缓存从 `immutable` 退成 `no-cache` + ETag，保证重发后客户端能拿到新包 |
 | **失败路径的 promise 泄漏** | 上传中断时 `tasks` 无人消费，pipeline 的 rejection 会变成未捕获异常直接杀进程。所有异步任务当场挂 `.catch`，`abort()` 里用 `Promise.allSettled` 收尾 |
 | 磁盘写满 | 上传前检查剩余空间（1.1 倍）；管理页顶部常驻显示；`/healthz` 写盘探针失败即标 unhealthy |
 | 路径穿越 | `platform`/`arch` 白名单 + 版本号正则 + 磁盘名程序生成，三重挡 |
@@ -1303,7 +1309,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 | 容器重建丢数据 | 数据全在宿主机挂载目录，容器无状态 |
 | 谁传的说不清 | `uploaded_ip` + `uploaded_at` 记录在案。**前提是源 IP 真实**，见上一条 |
 | 下载计数虚高 | 断点续传会发多个 Range 请求，只对「无 Range 或 `bytes=0-`」计数 |
-| 下载计数偏低 | `immutable` 生效期内浏览器不发请求，服务端零感知。这是口径问题，不是 bug，页面上标注清楚 |
+| 下载计数偏高 | 改成 `no-cache` 后，本地已缓存时浏览器也会回来校验一次，这次可能被计成一次下载。属于口径问题，不是 bug，页面上标注清楚 |
 | 备份 | 整个 `/srv/online_exe/data` 目录拷走即可 |
 
 ### 5.1 几个平台特有的现实问题
@@ -1699,7 +1705,7 @@ host 模式的代价与对策：
 **下面 6 条是硬伤用例，必须全部过**：
 
 36. **上传中途客户端断开，服务不退出**：`curl --limit-rate 1M` 传 400MB，传到一半 `kill` 掉 curl，再 `curl -v http://IP:8080/healthz` 必须 200；`docker logs` 里不能出现 `UnhandledPromiseRejection` / `uncaughtException`。**连做 10 次**，容器 `RestartCount` 必须还是 0。这条不通过就别上线
-37. **删除后同版本重传**：删除 `1.3.0/windows10-x64`，再传同一个版本号，必须 409；管理页「已删除」筛选里能看到墓碑记录
+37. **删除后同版本重传**：删除 `1.3.0/windows10-x64`，再传同一个版本号，**必须 201**（墓碑保留但不再挡重发），`id` 与原来一致、状态回到 `active`、`sha256` 是新内容；管理页「已删除」筛选里不再有它，默认列表里出现；再传一次（此时是在架状态）必须 409
 38. **8 个并发大包的空间预检**：把 `/data` 缩到只剩 2GB（临时挂一个小盘或 `--storage-opt` 限制），同时开 8 个 400MB 上传（合计 3.2GB，预留口径 3.5GB），预期是「部分 507、部分成功」，**不能出现全部通过、最后集体 ENOSPC，也不能让服务崩**
 39. **源 IP 真实性**：按 4.8 的命令从另一台内网机器访问，`remoteAddress` 必须是那台机器的真实 IP；同时确认新上传记录的 `uploaded_ip` 与之一致
 40. **续传不重复计数**：`curl -C -` 分三次续传同一个包，`stats.json` 里这个 id 的计数只 +1（若中途换过文件则允许 +2）

@@ -756,18 +756,47 @@ curl.exe -i -X DELETE "http://127.0.0.1:8080/api/releases/$id"
 
 **结果**：☐ 通过　☐ 失败　备注：\__________
 
-### D-08 删除后同版本重传 409 P0（硬伤）
+### D-08 删除后可重新发布同一版本号 P0
 
-用 D-06 那条记录的版本号重传：
+> 这条的期望在 2026-11-06 改过：**删除后不再「永久作废」**。删除的语义是「这个版本作废、文件没了」，
+> 既然文件已经删了，就不该再用「已存在」拦住重发同一个版本号。
+
+用 D-06 删掉的那条记录重传，故意换个文件内容，便于分辨是不是新包：
+
+```powershell
+Set-Content -Path F:\tmp\pkg\v2.bin -Value "redeployed-content" -NoNewline -Encoding ascii
+
+$r = curl.exe -s -X POST "http://127.0.0.1:8080/api/releases?version=$($rel.version)&platform=$($rel.platform)&arch=$($rel.arch)" `
+  -F "file=@F:/tmp/pkg/v2.bin" | ConvertFrom-Json
+"id=$($r.id)  status=$($r.status)  size=$($r.size)"
+"id 与删除前相同？$($r.id -eq $($rel.id))"
+```
+
+**期望**：
+
+| 检查 | 期望 | 结果 |
+|---|---|---|
+| HTTP | `201`（不再 409） | ☐ |
+| `status` | `active` | ☐ |
+| `id` | 与删除前**完全一致**（下载计数不归零） | ☐ |
+| `sha256` / `size` | 是新文件的内容 | ☐ |
+| 磁盘 | `releases\{version}\{platform}-{arch}\package.bin` 重新出现 | ☐ |
+| 「已删除」筛选 | 不再有它 | ☐ |
+| 默认列表 | 出现且在架 | ☐ |
+
+再传一次（此时是**在架**状态）→ 必须 `409`，证明只放宽了墓碑这一种：
 
 ```powershell
 curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=$($rel.version)&platform=$($rel.platform)&arch=$($rel.arch)" `
-  -F "file=@F:/tmp/pkg/small.bin"
+  -F "file=@F:/tmp/pkg/v2.bin"
 ```
 
-**期望**：`409`「… 已存在，请改用新版本号」。
+最后确认缓存策略跟着改了（否则删了重发，浏览器还在用旧包）：
 
-这条是墓碑机制存在的唯一理由：**删除后版本号永久作废**。否则「删了再传」等于给同一个 URL 换内容，`immutable` 缓存和版本追溯同时失效。
+```powershell
+curl.exe -s -o NUL -D - "http://127.0.0.1:8080$($r.download_url)" | Select-String 'Cache-Control'
+# 期望：public, no-cache（不是 immutable）
+```
 
 **结果**：☐ 通过　☐ 失败　备注：\__________
 
@@ -1094,7 +1123,7 @@ $env:ADMIN_ALLOW_CIDR = "127.0.0.1/32"
 | 点取消 | 什么都不发生，行还在 | ☐ |
 | 点确定 | 行**直接从表格消失，不整页刷新、滚动不动**；状态条「版本总数」-1、「占用合计」减去该包大小 | ☐ |
 | 切到「已删除」筛选 | 能查到墓碑 | ☐ |
-| 删完再传同版本号 | 409（版本号已作废） | ☐ |
+| 删完再传同版本号 | `201`（删除后可重新发布）；**再传一次**才 409（在架不可覆盖） | ☐ |
 
 核对点：弹框里的**版本号 + 平台 + 架构**要和点的那一行完全一致——这是替代「手打版本号」的唯一防呆手段，写错了就等于没有确认。
 
@@ -1362,7 +1391,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 | 改了 CSS/JS 没生效 | `Ctrl+F5` | 静态资源不该设长缓存，确认没加 `immutable` |
 | 拖拽上传没反应 | F12 Console 报错 | `admin.js` 没加载，检查 `/admin.js` 是否 200 |
 | 孤儿数字一直涨 | `GET /api/orphans` | 有人手工往 `releases/` 塞文件；确认无用后清理 |
-| 删掉的版本又冒出来 | `?status=deleted` 查一下 | 正常：墓碑保留，只是默认列表不显示 |
+| 删掉的版本又冒出来 | 看 `status` 筛选是不是「已删除」 | 用同版本号重传过就会回到在架，这是设计行为；没重传却出现则查 `releases.json` 是否被手改 |
 | `Invoke-RestMethod` 抛 403/404 | 换 `curl.exe -i` 看原始响应 | IRM 遇 4xx 直接抛异常，看不到 body |
 
 ---
