@@ -6,7 +6,7 @@
   },
   "releases": [
     {
-      "id": "20261104T090404-a32911c8",
+      "id": "20261104T091459-62abdcf7",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -22,11 +22,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-2ac34189",
+      "id": "20261104T091459-05179c13",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -42,11 +42,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-91be4065",
+      "id": "20261104T091459-c65bd0d6",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -62,11 +62,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-4fb69df0",
+      "id": "20261104T091459-75873d70",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -82,11 +82,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-75e56c91",
+      "id": "20261104T091459-8c56f171",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -102,11 +102,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-299df58c",
+      "id": "20261104T091459-e5e3fd3c",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -122,11 +122,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-8f695f9b",
+      "id": "20261104T091459-cc513963",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -142,11 +142,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261104T090404-4d365e15",
+      "id": "20261104T091459-a63f931c",
       "version": "1.3.0",
       "major": 1,
       "minor": 3,
@@ -162,11 +162,11 @@
       "changelog": "修复登录闪退；启动速度优化 30%。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-04T09:04:04.973Z",
+      "uploaded_at": "2026-11-04T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-bddb3e4d",
+      "id": "20261015T091459-38c1a0dd",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -182,11 +182,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-936ee9b2",
+      "id": "20261015T091459-eee1d605",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -202,11 +202,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-23f08fc7",
+      "id": "20261015T091459-4b95240f",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -222,11 +222,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-2f9fe735",
+      "id": "20261015T091459-0c4bf879",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -242,11 +242,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-10f5b093",
+      "id": "20261015T091459-e460c3a9",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -262,11 +262,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-ae5e876f",
+      "id": "20261015T091459-e2c18feb",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -282,11 +282,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-64217214",
+      "id": "20261015T091459-5d447872",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -302,11 +302,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261015T090404-4ec9d378",
+      "id": "20261015T091459-3eda6786",
       "version": "1.2.0",
       "major": 1,
       "minor": 2,
@@ -322,11 +322,11 @@
       "changelog": "新增成绩榜；修复手柄热插拔失效。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-10-15T09:04:04.973Z",
+      "uploaded_at": "2026-10-15T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261103T090404-5e8a7bd8",
+      "id": "20261103T091459-d0673094",
       "version": "1.4.0-beta.1",
       "major": 1,
       "minor": 4,
@@ -342,11 +342,11 @@
       "changelog": "预发布：新角色系统，欢迎内测反馈。",
       "status": "active",
       "file_missing": false,
-      "uploaded_at": "2026-11-03T09:04:04.973Z",
+      "uploaded_at": "2026-11-03T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20261006T090404-ac0f374f",
+      "id": "20261006T091459-600d1545",
       "version": "1.1.0",
       "major": 1,
       "minor": 1,
@@ -362,11 +362,11 @@
       "changelog": "修复 macOS 全屏退出异常。",
       "status": "yanked",
       "file_missing": false,
-      "uploaded_at": "2026-10-06T09:04:04.973Z",
+      "uploaded_at": "2026-10-06T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20260921T090404-cee60809",
+      "id": "20260921T091459-1a2582fd",
       "version": "1.0.0",
       "major": 1,
       "minor": 0,
@@ -382,11 +382,11 @@
       "changelog": "首个内测版本。",
       "status": "active",
       "file_missing": true,
-      "uploaded_at": "2026-09-21T09:04:04.973Z",
+      "uploaded_at": "2026-09-21T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     },
     {
-      "id": "20260906T090404-c2ef262c",
+      "id": "20260906T091459-a3de3d77",
       "version": "0.9.0",
       "major": 0,
       "minor": 9,
@@ -402,7 +402,7 @@
       "changelog": "历史版本，已删除。",
       "status": "deleted",
       "file_missing": false,
-      "uploaded_at": "2026-09-06T09:04:04.973Z",
+      "uploaded_at": "2026-09-06T09:14:59.813Z",
       "uploaded_ip": "10.20.3.51"
     }
   ]
