@@ -9,8 +9,8 @@
       <b><%= fmtSize(summary.free) %></b>
       <span class="dim">/ 共 <%= fmtSize(summary.total) %></span>
     </div>
-    <div class="stat"><span class="stat-label">版本总数</span><b><%= summary.totalVersions %></b></div>
-    <div class="stat"><span class="stat-label">占用合计</span><b><%= fmtSize(summary.occupied) %></b></div>
+    <div class="stat"><span class="stat-label">版本总数</span><b id="stat-versions"><%= summary.totalVersions %></b></div>
+    <div class="stat"><span class="stat-label">占用合计</span><b id="stat-occupied" data-bytes="<%= summary.occupied %>"><%= fmtSize(summary.occupied) %></b></div>
     <div class="stat">
       <span class="stat-label">孤儿文件</span>
       <b id="orphan-count"><%= summary.orphan.count %> 个</b>
@@ -101,16 +101,27 @@
     </div>
 
     <% if (rows.length === 0) { %>
-      <p class="empty">当前筛选下没有版本。</p>
+      <p class="empty">还没有任何版本。</p>
     <% } else { %>
-    <div class="table-wrap">
+    <div class="table-wrap" id="list-wrap">
       <table class="table">
         <thead>
           <tr><th>版本</th><th>平台</th><th>架构</th><th>大小</th><th>上传时间</th><th>状态</th><th>下载</th><th>操作</th></tr>
         </thead>
-        <tbody>
+        <tbody id="list-body">
           <% rows.forEach(function(r){ %>
-          <tr data-id="<%= r.id %>" class="<%= r.file_missing ? 'row-missing' : '' %>">
+          <%# data-* 是给前端做「局部更新 + 前端筛选」用的：
+              撤回/恢复/删除不再整页刷新，切筛选也不再走导航，只在这里切换显隐。
+              所以 status / missing / prerelease / platform / size 都得带到 DOM 上 %>
+          <tr data-id="<%= r.id %>"
+              data-status="<%= r.status %>"
+              data-missing="<%= r.file_missing ? '1' : '0' %>"
+              data-prerelease="<%= r.is_prerelease ? '1' : '0' %>"
+              data-platform="<%= r.platform %>"
+              data-size="<%= r.size %>"
+              data-version="<%= r.version %>"
+              data-combo="<%= r.comboLabel %>"
+              class="<%= r.file_missing ? 'row-missing ' : '' %><%= visibleIds.has(r.id) ? '' : 'row-hidden' %>">
             <td><b><%= r.version %></b> <span class="tag"><%= r.is_prerelease ? 'Beta' : '正式' %></span></td>
             <td><%= r.platformLabel %></td>
             <td><%= r.arch %></td>
@@ -119,7 +130,7 @@
               <%= fmtDate(r.uploaded_at) %>
               <div class="dim small"><%= r.uploaded_ip || '' %></div>
             </td>
-            <td>
+            <td class="cell-status">
               <% if (r.status === 'deleted') { %><span class="badge">已删除</span><% } %>
               <% if (r.status === 'yanked') { %><span class="badge">已撤回</span><% } %>
               <% if (r.status === 'active') { %><span class="badge badge-ok">在架</span><% } %>
@@ -159,6 +170,9 @@
         </tbody>
       </table>
     </div>
+    <%# 前端筛选后可能一行都不剩，这个占位由 admin.js 控制显隐（服务端不再重渲染列表）。
+        初始状态也要对：当前筛选本来就为空时直接显示，避免 JS 未执行时只剩表头 %>
+    <p class="empty" id="list-empty" <%= visibleIds.size === 0 ? '' : 'hidden' %>>当前筛选下没有版本。</p>
     <% } %>
   </section>
 

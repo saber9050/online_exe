@@ -210,7 +210,7 @@ Content-Type: application/octet-stream
 |---|---|
 | 同组合同版本已存在且 `file_missing=false` | `409`，带 `existing` |
 | 同组合同版本已存在但 `file_missing=true` | **允许重传**，沿用原 `id`，下载计数不归零 |
-| 同组合同版本是墓碑（`status=deleted`） | `409`（`file_missing` 是 false，正常命中） |
+| 同组合同版本是墓碑（`status=deleted`） | **允许重传**（删除后重新发布同一版本号），沿用原 `id`，状态回到 `active` |
 | 同 key 正在上传 | `409`「该版本正在上传」 |
 | `windows7` 与 `windows10` 同版本 | 两条独立记录，**这是常态不是重复** |
 
@@ -361,7 +361,7 @@ curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/unyank" # 等同 PAT
 |---|---|
 | 成功 | `200` + DTO（`status: "deleted"`，`file_missing: false`） |
 | 副作用 | 删掉 `data/releases/{version}/{platform}-{arch}/package.bin`，目录不主动删 |
-| 不可恢复 | 删除后同版本号**永久作废**，再传一律 409 |
+| 不可恢复 | 记录**留痕**（可在「已删除」筛选里查到），但**同版本号可以重新发布**，见 §7.2 |
 
 ### 7.1 错误
 
@@ -378,11 +378,15 @@ curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/unyank" # 等同 PAT
 curl.exe -i -X DELETE "http://127.0.0.1:8080/api/releases/$id"
 ```
 
-### 7.2 为什么不是真删
+### 7.2 为什么记录不真删，但允许重发
 
-真删会留下一个洞：删掉再以同版本号传新包，`/dl/1.3.0/windows10-x64` 内容变了而 URL 没变，`Cache-Control: immutable` 与「版本号不可变」同时击穿。墓碑让查重天然拦住（`file_missing=false` → 409）。
+记录留着是为了**留痕**：谁在什么时候删过哪个版本，事后还能在「已删除」筛选里翻到，`object_key` 也保留（指向已不存在的文件）。文件本身是立即删掉的。
 
-墓碑默认不出现在 `GET /api/releases`（`all` 已排除），用 `status=deleted` 查。
+但「留痕」不等于「永久封号」——删除的语义是「这个版本作废、东西没了」，既然文件都没了，再拿「已存在」挡住重新上传同一个版本号只会逼用户去改版本号。所以查重放行 `status=deleted` 的记录（见 §5.3）。
+
+配套改动：`/dl/` 的缓存从 `Cache-Control: immutable` 退成 `no-cache` + ETag。否则删掉重发之后，浏览器一年内都不会回源，用户会「下了但程序没变」，且从现象上查不到原因。
+
+墓碑默认不出现在 `GET /api/releases`（`all` 已排除），用 `status=deleted` 查；一旦用同版本号重传成功，它就从「已删除」里消失、回到 `active`。
 
 ---
 

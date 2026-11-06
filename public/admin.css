@@ -1,5 +1,13 @@
 /* 管理页样式。只在 Chrome / Edge 使用，无需兼容 IE11。 */
 
+/* 常驻纵向滚动条：切筛选后列表变短时，滚动条一旦消失，整张表会横向重排——
+   肉眼看到的就是「抖一下」。把滚动条槽固定住，行宽就不变了 */
+html { overflow-y: scroll; }
+
+/* 前端筛选隐藏行。对 <tr> 用 class 而不是 hidden 属性，避免个别浏览器
+   对表格行 display 处理不一致 */
+.row-hidden { display: none; }
+
 main.wrap { padding-top: 24px; }
 
 /* 状态条 */
@@ -136,6 +144,10 @@ main.wrap { padding-top: 24px; }
 .ops .btn { margin-right: 6px; }
 .row-missing td { background: #fffafa; }
 .row-flash td { background: #fff8e1; transition: background 1s; }
+/* 刚被撤回/恢复、但已不符合当前筛选的行：淡化保留，刷新后才消失。
+   直接删行会让用户「点完就看不见结果」，以为操作把记录弄丢了 */
+.row-stale { opacity: 0.55; }
+.row-stale td { background: #fafbfc; }
 
 .suggestion { padding: 10px 0; border-bottom: 1px dashed #eef1f6; }
 .suggestion:last-child { border-bottom: 0; }

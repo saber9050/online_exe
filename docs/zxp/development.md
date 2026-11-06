@@ -45,7 +45,7 @@
 | 4 | `src/middleware/errors.js` | 30 | 404 + 按 `err.status` 输出统一错误 | 报错格式不统一，前端解析炸 |
 | 5 | `src/routes/dto.js` | 29 | 磁盘结构 → HTTP 结构映射 | 磁盘 JSON 被响应格式污染 |
 | 6 | `src/routes/upload.js` | 330 | busboy 流式上传、查重、并发、空间预检 | 内存爆 / 进程被未捕获异常打死 |
-| 7 | `src/routes/releases.js` | 233 | 列表筛选、撤回/恢复、墓碑、孤儿接口 | 版本不可变被击穿 |
+| 7 | `src/routes/releases.js` | 233 | 列表筛选、撤回/恢复、墓碑、孤儿接口 | 在架版本被覆盖 / 墓碑挡住重发 |
 | 8 | `src/catalog/orphan.js` | 126 | 孤儿文件列出/单删/清空 + 路径逃逸防护 | `?path=../` 能把版本库删掉 |
 | 9 | `src/routes/pages/admin.js` | 99 | 管理页数据装配 | 状态条数字不对、按钮给错 |
 | 10 | `views/admin.ejs` | 188 | 三段式页面骨架 + 孤儿面板 | IE 打开一片空白 |
@@ -276,7 +276,7 @@ receiving ──bb.close──→ committing ──成功──→ done
 | 步 | 动作 | 关键点 |
 |---|---|---|
 | 1 | `parseVersion(query.version)` + 白名单校验 | 不需要读 body；`parseVersion` 内部已剥 `v` |
-| 2 | **同步块**：`catalog.get` 查重 → `inflight.has` → `inflight.set` | 中间不能有 `await`，否则不原子 |
+| 2 | **同步块**：`catalog.get` 查重（判据 `isVersionTaken()`，见 §6.3）→ `inflight.has` → `inflight.set` | 中间不能有 `await`，否则不原子 |
 | 3 | `freeBytes()`（5s 缓存）+ `tryReserve(Content-Length)` | 可用 − 已预留 < `1.1 × CL` → `507` |
 | 4 | `storage.ensureDir()` | 失败 → 释放占位 + 额度 |
 | 5 | 建 busboy，挂 8 个事件 | 见 §5.5 |
@@ -424,7 +424,7 @@ Get-ChildItem -Recurse F:\tmp\oe-test\releases -Filter *.tmp
 
 `platform` 参数：`all` 或 4 个平台 id 之一。
 
-**已知缺口**：未知 `status` 值不会落进任何分支，结果等价于「不过滤」，连墓碑一起返回（见 §10 缺口 3）。
+`status` 走白名单查表：非法值在接口层返回 400（文案会列出可选值），页面层回落成 `all`。别再用 if/else 链——链式写法对未知值落不进任何分支，等于完全不过滤，会把墓碑一起吐出去。
 
 ### 6.2 撤回 / 恢复
 
@@ -448,9 +448,22 @@ catalog.apply(record)
 
 1. **`object_key` 保留**，不要置空——置空后查不出「这条记录当初存在哪个路径」
 2. **`file_missing = false`**：墓碑不是「文件意外丢失」，是「文件被主动删除」
-3. **对账必须跳过 `status === 'deleted'`**（A 的 `persist.reconcile`）。否则重启对账发现「记录在、文件没了」→ 置 `file_missing = true` → 查重条件 `file_missing !== true` 放行 → **墓碑的不可变保护当场失效**
+3. **对账必须跳过 `status === 'deleted'`**（A 的 `persist.reconcile`）。否则重启对账发现「记录在、文件没了」，会给墓碑打上 `file_missing = true` 红标，管理页看着像丢文件事故
 
-墓碑的意义：删掉再以同版本号传新包，下载 URL 不变而内容变了，`Cache-Control: immutable` 和「版本号不可变」同时击穿。有了墓碑，查重天然拦住（`file_missing` 是 false → 409）。
+**墓碑不阻止重新发布。** 删除的语义是「这个版本作废、东西没了」；既然文件已经删了，就不该再用「已存在」拦住重传同一个版本号。查重判据统一在 `isVersionTaken()`：
+
+```js
+function isVersionTaken(rec) {
+  if (!rec) return false
+  if (rec.file_missing === true) return false   // 记录在、文件没了 → 补传
+  if (rec.status === 'deleted') return false    // 墓碑 → 删掉重发
+  return true                                   // active / yanked → 409
+}
+```
+
+入口查重和队列内二次查重**必须调同一个函数**，写两份必然漂移。
+
+代价与配套：同一个 `/dl/{version}/{combo}` 在不同时间可能对应不同内容，所以下载响应不能再设 `Cache-Control: immutable`，改成 `no-cache` + ETag（内容没变就 304）。这条在 A 的 `src/routes/download.js` 里。
 
 ### 6.4 状态 × 文件事实 → 按钮矩阵
 
@@ -530,8 +543,16 @@ maxUploadMb, keepPerPlatform
 | 7 | 成功高亮 | `sessionStorage['online-exe-flash']` 存 id，重载后给该行加 3 秒高亮 |
 | 8 | 重新上传预填 | `data-action="reupload"` 把版本/平台/架构写回表单并滚到上传区 |
 | 9 | 删除二次确认 | `window.confirm` 弹框，文案含「版本（平台 · 架构）+ 不可恢复 + 版本号作废 + 提示改用撤回」；**不再要求手打版本号** |
-| 10 | 筛选即提交 | select `change` 触发 `form.submit()` |
+| 10 | **前端筛选（不提交表单）** | select `change` / 「筛选」按钮提交都 `preventDefault`，改为遍历 `tr[data-*]` 切 `.row-hidden`；URL 用 `history.replaceState` 同步，刷新或分享链接时服务端仍按参数渲染 |
 | 11 | 孤儿面板 | 点「查看」才 `GET /api/orphans`（懒加载），逐行删除二次确认，全部清理后整页刷新；列表用 `textContent` 渲染，文件名绝不当 HTML 拼 |
+| 12 | **行内更新（不整页刷新）** | 撤回/恢复只改这一行：徽章 `innerHTML`、撤回↔恢复按钮互换 `data-action` 与文字、`flashRow` 闪 3 秒；删除只摘掉 `<tr>` 并同步状态条（版本总数 −1、占用按 `data-bytes` 减 `data-size`） |
+| 13 | 不匹配筛选的行保留 | 撤回后若当前筛选是「正式/预发布」，行加 `.row-stale` 淡化 + `title` 说明「切换筛选后不再显示」，**不立刻删行**——否则用户点完就看不见结果 |
+
+> 10/12/13 三条解决的是同一类问题：**列表区的任何操作都不该引起整页刷新**。
+> 刷新会重置滚动位置，列表变短时纵向滚动条消失还会让整表横向重排，两件事叠起来就是肉眼可见的「抖动」。
+>
+> 所以服务端 `renderAdmin` **不再按筛选裁行**：`rows` 一次给全量（含墓碑），同时算出 `visibleIds` 让模板给不匹配的行打 `row-hidden`（首屏和刷新后与服务端口径一致，也不会闪一下再隐藏）。
+> 只有**上传成功**仍整页刷新（新行要插进正确的排序位置，交给服务端重排最稳）。
 
 **前端不许做的三件事**：
 

@@ -42,7 +42,14 @@ export async function downloadHandler(req, res, next) {
     `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(rel.filename)}`,
   )
   res.setHeader('ETag', `"${rel.sha256}"`)
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  // 缓存策略：no-cache = 可以存，但每次必须回源校验（ETag 是内容 sha256，未变就 304，几乎零成本）。
+  //
+  // 为什么不用原来的 `max-age=31536000, immutable`：
+  // 管理页允许「删除某版本后重新上传同一版本号」（墓碑不再挡重发），
+  // 这时同一个 /dl URL 会对应新内容。immutable 会让浏览器一年内不再发请求，
+  // 用户只会报「我下了但程序没变」，而且从现象上根本查不到原因。
+  // 内网带宽不是瓶颈，牺牲「完全不发请求」换「永远拿到当前那份」是划算的。
+  res.setHeader('Cache-Control', 'public, no-cache')
 
   res.sendFile(
     abs,
