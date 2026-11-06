@@ -1203,14 +1203,38 @@ docker images | grep online-exe
 
 ### I-02 挂卷起容器 P0
 
+> 仓库里**没有 `docker-compose.yml`**，整组都用 `docker run`。
+> 后面 I-04 / I-05 / I-06 要重启容器时，都是「`docker rm -f online-exe` + 重跑本条命令」。
+
 ```bash
 mkdir -p /srv/online_exe/data && chown -R 1000:1000 /srv/online_exe/data
-docker compose up -d
-docker compose ps
-docker compose logs -f
+
+docker run -d --name online-exe \
+  --network host --restart unless-stopped --stop-timeout 45 \
+  -e TZ=Asia/Shanghai -e PORT=8080 -e DATA_DIR=/data \
+  -e MAX_UPLOAD_MB=800 -e KEEP_PER_PLATFORM=5 -e ADMIN_ALLOW_CIDR=10.20.0.0/16 \
+  -v /srv/online_exe/data:/data \
+  --log-driver json-file --log-opt max-size=20m --log-opt max-file=3 \
+  online-exe:1.0.0
+
+docker ps --filter name=online-exe
+docker logs -f online-exe
 ```
 
 **期望**：容器 `Up` 且 `healthy`（30–60 秒内）；日志出现 `listening`。
+
+**顺带验一下入口脚本的兜底**（这是 `EACCES: mkdir '/data/releases'` 那个坑的回归用例）：
+
+```bash
+docker rm -f online-exe
+sudo rm -rf /srv/online_exe/data && sudo mkdir -p /srv/online_exe/data   # 属主变成 root
+# ↑ 把上面那条 docker run 原样再跑一遍
+docker logs online-exe
+docker exec online-exe id                                              # 期望 uid=1000(node)
+```
+
+**期望**：日志里出现 `[entrypoint] … 尝试修正属主` → `属主已改为 1000:1000`，服务正常 `listening`，
+容器内进程仍是 `node` 用户（不是 root）。
 
 **结果**：☐ 通过　☐ 失败　备注：__________
 
@@ -1230,7 +1254,7 @@ ls -ln /srv/online_exe/data/releases/*/*/
 
 ```bash
 docker rm -f online-exe
-docker compose up -d
+# 重跑 I-02 的 docker run 命令
 curl -s http://127.0.0.1:8080/api/releases | head -c 200
 ```
 
@@ -1243,10 +1267,10 @@ curl -s http://127.0.0.1:8080/api/releases | head -c 200
 ```bash
 sudo reboot
 # 起来后
-docker compose ps
+docker ps --filter name=online-exe
 ```
 
-**期望**：容器自动 `Up`（`restart: unless-stopped`）。
+**期望**：容器自动 `Up`（`--restart unless-stopped`）。
 
 **结果**：☐ 通过　☐ 失败　备注：__________
 
@@ -1259,6 +1283,10 @@ sleep 95                                        # 等 3 次 * 30s 探测
 docker ps --format "{{.Names}}\t{{.Status}}"    # 期望 unhealthy
 chmod -R u+w /srv/online_exe/data
 ```
+
+> **顺序不能反**：必须在容器已经跑起来之后改权限。如果先 `chmod a-w` 再重启容器，
+> 入口脚本会发现 `/data` 对 node 不可写 → 退回 root 运行 → 而 root 能绕过 DAC 权限位照样写，
+> 于是 healthz 变回 200，这条用例就测不出东西了。
 
 **结果**：☐ 通过　☐ 失败　备注：__________
 
@@ -1276,7 +1304,7 @@ docker stop online-exe
 **期望**：
 - 容器等上传结束（或 30 秒超时）才退出，日志出现 `[shutdown] 收到 SIGTERM`
 - `stats.json` 计数没丢
-- **不是**立刻断开（默认只等 10 秒就是没配 `stop_grace_period: 45s`）
+- **不是**立刻断开（默认只等 10 秒就是 `docker run` 里漏了 `--stop-timeout 45`）
 
 **结果**：☐ 通过　☐ 失败　备注：__________
 
@@ -1413,7 +1441,7 @@ Remove-Item Env:DATA_DIR, Env:PORT, Env:MAX_UPLOAD_MB, Env:ADMIN_ALLOW_CIDR -Err
 容器测过的再补一句（Linux）：
 
 ```bash
-docker compose down
+docker rm -f online-exe
 ```
 
 最后确认 `git status` 只剩你自己的代码改动。

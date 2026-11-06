@@ -84,7 +84,7 @@ online_exe/
 ├── data/                     # 运行时数据（挂载点，不进镜像、不进 git）
 ├── docs/                     # 设计与文档
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-entrypoint.sh      # 容器入口：修 /data 属主后降权到 uid 1000
 └── start.bat / start.sh      # 懒人启动脚本（自动 npm install）
 ```
 
@@ -254,34 +254,66 @@ npm test        # = node scripts/test-b.mjs
 
 ## 10. Docker 部署
 
-### 10.1 构建 + 离线导入
+前提（都已就绪，这里不重复）：构建机能上外网并装好 Docker；服务器已装 Docker；`/srv/online_exe/data` 已建好。
 
-```powershell
-# 构建机（有外网）
+> 目录属主不用手动 `chown`——镜像的入口脚本会以 root 进来把 `/data` 改成 uid 1000 再降权运行。若挂载点位于 Windows 盘（`/mnt/c`、`/mnt/f`）或 NFS，`chown` 不可能生效，脚本会退回 root 运行并打印告警，此时请改用命名卷（`-v online_exe_data:/data`）或 WSL 的 ext4 路径。
+
+### 1. 构建（构建机）
+
+```bash
 docker build -t online-exe:1.0.0 .
+```
+
+> 基础镜像、Alpine 包源、npm 源都已在 Dockerfile 里指向国内镜像站，**不需要提前配 daemon.json 或 `.npmrc`**。
+> 万一镜像站不可用，换回官方源：`docker build --build-arg NODE_IMAGE=node:24-alpine -t online-exe:1.0.0 .`
+
+### 2. 导出（构建机）
+
+```bash
 docker save online-exe:1.0.0 -o online-exe-1.0.0.tar
 ```
 
+把 `online-exe-1.0.0.tar` 拷到内网服务器。
+
+### 3. 导入（服务器）
+
 ```bash
-# 内网服务器
 docker load -i online-exe-1.0.0.tar
-mkdir -p /srv/online_exe/data
-chown -R 1000:1000 /srv/online_exe/data      # 关键：与容器内 node 用户对齐
-docker compose up -d
-docker compose logs -f
 ```
 
-### 10.2 compose 里的几个要点
+### 4. 运行（服务器）
 
-| 配置 | 为什么 |
-|---|---|
-| `network_mode: host` | bridge + `ports` 在部分环境会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 一起失真 |
-| `stop_grace_period: 45s` | 应用退出时要等上传收尾最多 30s，默认 10s 会被 SIGKILL |
-| `volumes: /srv/online_exe/data:/data` | 数据全在宿主机，容器无状态，删了重建不丢版本 |
-| `restart: unless-stopped` | 宿主机重启后自动拉起 |
-| `logging: max-size 20m / max-file 3` | 容器日志默认无限增长，几个月能把盘写满 |
+**只用 `docker run`，仓库里没有 compose 文件**（`docker save/load` 也只搬镜像，配置文件本来就不会跟着走）：
 
-升级只需改 `.env` 里的 `IMAGE_TAG` 再 `docker compose up -d`。
+```bash
+docker run -d --name online-exe \
+  --network host \
+  --restart unless-stopped \
+  --stop-timeout 45 \
+  -e TZ=Asia/Shanghai \
+  -e PORT=8080 \
+  -e DATA_DIR=/data \
+  -e MAX_UPLOAD_MB=800 \
+  -e KEEP_PER_PLATFORM=5 \
+  -v /srv/online_exe/data:/data \
+  --log-driver json-file --log-opt max-size=20m --log-opt max-file=3 \
+  online-exe:1.0.0
+```
+
+确认起来了：
+
+```bash
+docker ps --filter name=online-exe      # STATUS 里应出现 (healthy)
+```
+
+升级 = 导入新 tag 的镜像后重跑一遍：
+
+```bash
+docker rm -f online-exe
+docker run -d --name online-exe ...（同上，只换最后的 tag）
+```
+
+数据在卷里，版本记录和包都不会丢。每个参数的含义见 [`docs/zxp/development.md`](docs/zxp/development.md) §8。
 
 ---
 
@@ -289,10 +321,13 @@ docker compose logs -f
 
 | 现象 | 原因 / 处理 |
 |---|---|
+| `docker build` 卡在 `FROM node:24-alpine`、几分钟不动甚至 `Canceled` | 拉 Docker Hub 慢，配 Docker 镜像加速；或用 `--build-arg NODE_IMAGE=<加速地址>/node:24-alpine`（Dockerfile 已留参数） |
 | `/admin` 全 403 | `ADMIN_ALLOW_CIDR` 没含本机网段；容器里若 `uploaded_ip` 全是 `172.17.0.x`，说明源 IP 被 Docker 改写，改用 host 网络 |
 | 上传 413 | 超过 `MAX_UPLOAD_MB`；若前面加了 Nginx，还要改 `client_max_body_size` |
 | 上传 507 | 磁盘可用空间不足（8 个 400MB 并发要预留约 3.5GB） |
-| 上传 500「创建存储目录失败」 | 宿主机目录属主不是 `1000:1000` |
+| 容器起不来，日志报 `EACCES: permission denied, mkdir '/data/releases'` | 挂载目录属主不是 uid 1000。新版镜像的入口脚本会自动 `chown` 后降权；若仍报错看下一行 |
+| 入口脚本打印「chown 失败」「改用 root 运行」 | 挂载点在 Windows 盘（`/mnt/*`）、NFS 或只读。换命名卷 `-v online_exe_data:/data`，或把目录放到 WSL 的 ext4（`~/online_exe-data`） |
+| 上传 500「创建存储目录失败」 | 宿主机目录属主不是 `1000:1000`，且容器以只读挂载运行 |
 | 大文件传到一半断 | 确认 `server.requestTimeout = 0`（代码里已设）；前面有代理也要放开超时 |
 | 页面时间差 8 小时 | 容器没装 tzdata 或没传 `TZ` |
 | 改了 CSS/JS 不生效 | `Ctrl+F5`；静态资源不设长缓存，理论上不会卡住 |

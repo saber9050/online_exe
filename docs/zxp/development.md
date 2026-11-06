@@ -29,7 +29,7 @@
 | `src/middleware/errors.js` | `src/middleware/cidr.js` |
 | `src/routes/dto.js`、`src/routes/upload.js`、`src/routes/releases.js` | `src/catalog/catalog.js`、`src/storage/storage.js`、`src/catalog/persist.js`、`src/catalog/stats.js`、`src/semver.js` |
 | `src/routes/pages/admin.js`、`views/admin.ejs`、`public/admin.css`、`public/admin.js` | `src/routes/pages/download.js`、`views/download.ejs`、`views/partials/*`、`public/download.*` |
-| `Dockerfile`、`docker-compose.yml`、`.dockerignore` | `fixtures/releases.sample.json` 的维护口径 |
+| `Dockerfile`、`docker-entrypoint.sh`、`.dockerignore` | `fixtures/releases.sample.json` 的维护口径 |
 
 **必须同改**：`src/constants.js`（8 组合白名单）、`package.json`、`package-lock.json`、`public/base.css`。
 
@@ -52,7 +52,7 @@
 | 11 | `public/admin.css` | 141 | 管理页样式（不用 CSS 变量 / Grid） | — |
 | 12 | `public/admin.js` | 533 | 上传进度、409 自动 +1、行操作、孤儿面板 | 发版人重复填 8 遍表单 |
 | 13 | `scripts/test-b.mjs` | 506 | 接口冒烟测试（`npm test`，74 条断言） | 改完不知道有没有弄坏别的 |
-| 14 | `Dockerfile` / `docker-compose.yml` / `.dockerignore` | 29 / 28 / 13 | 单容器交付 | 内网起不来 / 数据丢失 |
+| 14 | `Dockerfile` / `docker-entrypoint.sh` / `.dockerignore` | 47 / 62 / 13 | 单容器交付 + 启动时修 `/data` 属主 | 内网起不来 / `EACCES: mkdir '/data/releases'` |
 
 > `src/routes/index.js` 归 A，本次为补齐 `yank`/`unyank`/`orphans` 路由改了 6 行，已同步告知。
 
@@ -589,31 +589,61 @@ maxUploadMb, keepPerPlatform
 
 | 行 | 理由 |
 |---|---|
-| `FROM node:24-alpine` | 内置 `node` 用户（uid 1000），非 root 开箱可用；镜像 ~140MB |
+| `ARG NODE_IMAGE` + `FROM ${NODE_IMAGE}` | 默认指向 `docker.m.daocloud.io/library/node:24-alpine`（Docker Hub 国内代理）。构建机**不需要**预配 `daemon.json` 就能拉；要换官方或自有加速用 `--build-arg` |
+| `sed -i 's#dl-cdn…#mirrors.aliyun.com#g'` | Alpine 官方 CDN 在国内常年几十 KB/s，不换源 `apk add` 会卡几分钟 |
 | `apk add tzdata` | alpine 默认**没有时区文件**，不装 `TZ=Asia/Shanghai` 无效，页面差 8 小时 |
+| `apk add su-exec` | 入口脚本从 root 降回 node 用它，比 `gosu` 小一个数量级，alpine 官方源直接装 |
 | 先 `COPY package*.json` 再 `npm ci --omit=dev` | 只改代码时复用依赖层，构建 2 分钟 → 5 秒 |
+| `npm ci --registry=https://registry.npmmirror.com` | 国内装 npm 依赖也慢；用 `--build-arg NPM_REGISTRY=` 可切公司私服（npm 会把 lock 里的 npmjs 主机名替换成配置的 registry） |
 | `npm ci` 不是 `install` | 严格按 lock 装，可复现；`install` 可能偷升次版本 |
 | `--omit=dev` | nodemon 不进镜像（所以容器里 `npm run dev` 必然失败，这是预期） |
-| `USER node` | 与宿主机 `/srv/online_exe/data` 属主 `1000:1000` 对齐，否则上传 `EACCES` |
+| **不写 `USER node`** + `ENTRYPOINT docker-entrypoint.sh` | 见下方「为什么入口脚本要在 root 下起」 |
 | `HEALTHCHECK` 用 `node -e fetch` | alpine 的 busybox wget 能用但参数坑多，node 自带 fetch 更稳 |
 | 不用多阶段构建 | 纯 JS 无编译产物，多阶段只是多一层 `node_modules` 复制 |
 
+**为什么入口脚本要在 root 下起**
+
+镜像里 `USER node` 是对的（业务进程不该是 root），但它和 `-v 宿主目录:/data` 天然冲突：挂载点的属主由**宿主机**决定，宿主机只要没 `chown 1000:1000`，容器内 uid 1000 就写不了，启动直接：
+
+```
+[startup] 启动失败：
+EACCES: permission denied, mkdir '/data/releases'
+```
+
+这类错误的责任在部署命令，不在代码，但让部署者对着 `EACCES` 猜代价太高。于是改成：
+
+```
+root 进入 → 测 /data 对 uid 1000 是否可写
+  ├─ 可写            → su-exec 1000:1000 直接执行（不扫目录，快路径）
+  ├─ 不可写、chown 成功 → 改完再降权
+  └─ chown 也失败     → 告警后以 root 跑（Windows 盘 / NFS / 只读挂载走这条）
+```
+
+权限模型没有放松：**业务进程仍然不是 root**，只有入口脚本那一瞬间是。`docker exec -u 1000` 进去看到的照样是 node 用户。
+
+> 第三档（退回 root）是刻意的取舍：容器起不来 → 服务完全不可用；带告警跑起来 → 至少能用，日志里也留了怎么修。真要严格非 root，就在 `docker run` 加 `--user 1000:1000`，此时入口脚本第一行判断 `id -u != 0` 会直接透传，不尝试 chown。
+
+> 三个网络源（镜像站 / apk / npm）都写死在 Dockerfile 里，是刻意的：构建机往往是临时机器，
+> 让人先改 `daemon.json` 再构建，等于把「能不能构建」这件事托付给环境配置。宁可默认国内、用 build-arg 回退。
+
 `.dockerignore` 必须含 `data/`、`node_modules/`、`.git/`、`docs/`、`*.md`。`node_modules` 最要紧——本地依赖会覆盖镜像里 `npm ci` 装好的那份，而本地可能少装生产依赖。`data/` 不排掉等于把开发机的版本包打进镜像。
 
-### 8.2 compose 六个关键项
+### 8.2 `docker run` 六个关键参数
 
-| 项 | 值 | 为什么 |
+仓库里**不放 `docker-compose.yml`**，部署只有一条 `docker run`。原因很实际：`docker save` 只搬镜像，compose 文件本来就不会跟着 tar 走，服务器上十有八九没有它；与其维护两套（compose 和 run）还容易漂移，不如只留一套。下面这张表就是那一条长命令的逐项理由：
+
+| 参数 | 值 | 为什么 |
 |---|---|---|
-| `network_mode: host` | — | bridge + `ports` 在部分环境下把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 与 `uploaded_ip` 同时失真。这俩是本方案仅有的两道「谁能操作 / 谁传的」防线 |
-| `stop_grace_period` | `45s` | 必须 > shutdown 里等 inflight 的 30s，默认只等 10s |
-| `volumes` | `/srv/online_exe/data:/data` | 不挂卷 = `docker rm` 后版本全丢 |
-| `restart` | `unless-stopped` | 宿主机重启后自动拉起 |
-| `logging` | `max-size 20m` / `max-file 3` | 容器日志默认无限增长，几个月能把盘写满——「莫名其妙磁盘满了」的常见来源 |
-| `environment.ADMIN_ALLOW_CIDR` | 实例网段 | **必须包含构建机网段**，否则 CI 上传被自己挡成 403 |
+| `--network host` | — | bridge + `-p` 在部分环境下把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 与 `uploaded_ip` 同时失真。这俩是本方案仅有的两道「谁能操作 / 谁传的」防线 |
+| `--stop-timeout 45` | `45`（秒） | 必须 > shutdown 里等 inflight 的 30s，Docker 默认只等 10s 就 SIGKILL |
+| `-v /srv/online_exe/data:/data` | — | 不挂卷 = `docker rm` 后版本全丢 |
+| `--restart unless-stopped` | — | 宿主机重启后自动拉起 |
+| `--log-driver json-file --log-opt max-size=20m --log-opt max-file=3` | — | 容器日志默认无限增长，几个月能把盘写满——「莫名其妙磁盘满了」的常见来源 |
+| `-e ADMIN_ALLOW_CIDR=…` | 实例网段 | **必须包含构建机网段**，否则 CI 上传被自己挡成 403；本地 WSL 调试一般填 `172.24.0.0/16` |
 
-host 模式的代价：`ports` 映射失效（应用自己 `listen` 8080）、8080 被占就起不来、隔离性下降、Docker Desktop 上半残。部署目标是 Linux 服务器，都无所谓。
+host 模式的代价：`-p` 映射失效（应用自己 `listen(8080)`）、8080 被占就起不来、隔离性下降、Docker Desktop 上半残。部署目标是 Linux 服务器，都无所谓。
 
-`IMAGE_TAG` 走变量：升级时改 `.env` 的 `IMAGE_TAG=1.0.1`，`docker compose up -d` 完成替换。
+升级做法：`docker rm -f online-exe`，再用新 tag 跑同一条 `docker run`。数据在卷里，版本记录和包都不丢（也就没有 compose 那种「改 `IMAGE_TAG` 再 `up -d`」的便利，代价换来的是不用在服务器上放仓库文件）。
 
 ### 8.3 离线导入流程
 
@@ -630,9 +660,29 @@ Get-Item online-exe-1.0.0.tar | Select-Object Name, Length
 ```bash
 docker load -i online-exe-1.0.0.tar
 mkdir -p /srv/online_exe/data
-chown -R 1000:1000 /srv/online_exe/data    # 关键：与容器内 node 用户对齐
-docker compose up -d
-docker compose logs -f
+```
+
+`chown` 不是必须的：入口脚本会以 root 进来先试写、不行再 `chown -R 1000:1000 /data` 然后降权。手动做的好处是省掉一次启动时的目录扫描。
+
+> **Windows 盘别当数据目录**。`/mnt/c`、`/mnt/f` 这类 9p/drvfs 挂载点上 `chown` 不生效（权限由 Windows ACL 决定），入口脚本会打「chown 失败 → 改用 root 运行」。要修就换命名卷 `-v online_exe_data:/data`，或把目录放到 WSL 的 ext4（`~/online_exe-data`）。
+
+启动就一条命令（仓库里没有 compose 文件，也不必往服务器上拷任何配置）：
+
+```bash
+docker run -d --name online-exe --network host --restart unless-stopped \
+  --stop-timeout 45 -e TZ=Asia/Shanghai -e PORT=8080 -e DATA_DIR=/data \
+  -e MAX_UPLOAD_MB=800 -e KEEP_PER_PLATFORM=5 -e ADMIN_ALLOW_CIDR=10.20.0.0/16 \
+  -v /srv/online_exe/data:/data \
+  --log-driver json-file --log-opt max-size=20m --log-opt max-file=3 \
+  online-exe:1.0.0
+```
+
+查看状态与日志：
+
+```bash
+docker ps --filter name=online-exe        # STATUS 里应出现 (healthy)
+docker logs -f online-exe
+curl -i http://127.0.0.1:8080/healthz
 ```
 
 > Windows 上 `docker save -o` 生成的是 tar 文件，直接拷进内网服务器 `docker load` 即可，不用转换。
@@ -667,7 +717,7 @@ docker compose logs -f
 | 10 | 传输超 5 分钟不中断 | `curl --limit-rate 1M` 传 400MB |
 | 14 | 孤儿文件在管理页可见：状态条个数/大小正确，点开能看路径、能单个删、能全部清 | 已实现，见 `src/catalog/orphan.js` 与管理页孤儿面板 |
 | 17 | 挂载目录改只读 → `/healthz` 503、容器 unhealthy | `chmod -R a-w /srv/online_exe/data` |
-| 21 | `docker rm -f` 后 `up -d`，记录与文件都在 | — |
+| 21 | `docker rm -f` 后重跑 `docker run`，记录与文件都在 | — |
 | 22 | 宿主机重启自动拉起 | `reboot` |
 | 24 | 中文文件名不乱码 | 传 `测试包.exe`，看 `filename` 字段 |
 | 26 | `.exe` 后缀 + 随机字节，sha256 与页面一致 | `dd if=/dev/urandom of=x.exe bs=1M count=10` |

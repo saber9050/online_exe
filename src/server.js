@@ -70,7 +70,28 @@ async function main() {
 }
 
 main().catch((err) => {
+  const msg = err && err.message ? err.message : String(err)
   console.error('[startup] 启动失败：')
-  console.error(err.message || err)
+  console.error(msg)
+
+  // 权限类错误几乎只有一个原因：数据目录的属主不是运行用户。
+  // 容器里跑的是 uid 1000（node），宿主机挂载目录若属于 root，mkdir 直接 EACCES。
+  // 这里把「怎么改」直接打出来，省得对着 EACCES 猜。
+  if (err && (err.code === 'EACCES' || err.code === 'EPERM')) {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : '?'
+    console.error(`[startup] 当前进程 uid=${uid}，数据目录 ${cfg.dataDir} 不可写`)
+    if (uid === 0) {
+      console.error('[startup] 请检查挂载目录是否只读（-v 后面有没有漏 :rw / 是否 NFS root_squash）')
+    } else {
+      console.error(`[startup] 宿主机执行：sudo chown -R ${uid}:${uid} <被挂载的宿主机目录>`)
+      console.error('[startup] 若该目录在 Windows 盘（/mnt/c、/mnt/f），chown 不生效，请换到 ext4 路径或改用命名卷')
+    }
+  }
+
+  // 磁盘满也是上传类服务最常见的启动失败原因，单独提示一句
+  if (err && err.code === 'ENOSPC') {
+    console.error('[startup] 磁盘空间不足，清理后重试（管理页状态条可看占用）')
+  }
+
   process.exit(1)
 })

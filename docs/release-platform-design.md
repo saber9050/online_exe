@@ -314,7 +314,7 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'))
 process.on('SIGINT',  () => void shutdown('SIGINT'))
 ```
 
-`stop_grace_period` 要大于这个 30 秒，否则 Docker 会在我们等上传的时候先 SIGKILL。见 6.4 的 compose 配置。
+`--stop-timeout` 要大于这个 30 秒，否则 Docker 会在我们等上传的时候先 SIGKILL。见 6.4 的 `docker run` 参数。
 
 **别在 shutdown 里直接 `process.exit()`**，那样 `stats.flush()` 和队列里的 JSON 写都不会执行完。上面每一步都是 `await` 完再退。
 
@@ -406,7 +406,7 @@ online_exe/
 │   ├── releases/
 │   └── orphan/
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-entrypoint.sh       # 容器入口：修 /data 属主后降权到 uid 1000
 ├── start.sh / start.bat       # 本机一键启动（开发用）
 ├── .dockerignore
 └── docs/
@@ -1221,7 +1221,7 @@ const addr = (req.socket.remoteAddress || '').replace(/^::ffff:/, '')
 - `ADMIN_ALLOW_CIDR=10.20.0.0/16` 会把**所有**管理页请求 403，日志里那个地址看着还挺"正常"
 - `uploaded_ip` 全部记成同一个网关地址，5 节「谁传的说不清」这条防线直接失效
 
-所以 6.4 的 compose **默认改为 `network_mode: host`**，容器直接使用宿主机网络栈，源 IP 百分之百真实。验证命令：
+所以 6.4 的部署命令 **默认 `--network host`**，容器直接使用宿主机网络栈，源 IP 百分之百真实。验证命令：
 
 ```bash
 # 容器内起个临时端口，从另一台内网机器访问，看打印的地址是不是那台机器的 IP
@@ -1334,7 +1334,7 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
                                             │  U 盘 / 内网共享
                                             ▼
 内网服务器
-  docker load → docker compose up -d
+  docker load → docker run（见 6.4）
 ```
 
 镜像主要体积来自 `node:24-alpine` 基础层（~120MB），业务代码只有几百 KB。这个代价换来的是「内网不用装 node、不用 npm install」。
@@ -1354,26 +1354,35 @@ ls -lh online-exe-1.0.0.tar
 ```bash
 docker load -i online-exe-1.0.0.tar
 mkdir -p /srv/online_exe/data
-chown -R 1000:1000 /srv/online_exe/data     # 关键：与容器内 node 用户对齐
-docker compose up -d
-docker compose logs -f
+chown -R 1000:1000 /srv/online_exe/data     # 可选：入口脚本也会兜底修，手动做可省一次目录扫描
 ```
 
+> 挂载目录属主忘了改也不会挂：6.3 的入口脚本以 root 进来先试写、不行再 `chown -R` 然后 `su-exec` 降权。只有挂载点在 Windows 盘（`/mnt/*`）或 NFS 上 chown 才必然失败，那时脚本会打印告警并以 root 运行。
+
+启动用 `docker run`（参数见 6.4）。仓库不提供 compose 文件，`save/load` 也只搬镜像——配置文件不会跟着 tar 走，留着它只会让人以为服务器上敲 `docker compose up -d` 就能起。
+
 > 镜像版本号和业务版本号分开：镜像 `1.0.0` 是服务端程序版本，和客户端 `1.3.0` 没关系。
+>
+> 构建机不需要预配镜像加速：6.3 的 Dockerfile 已把基础镜像、apk、npm 三个源都指向国内镜像站，构建前无需改 `daemon.json`。
 
 ### 6.3 Dockerfile
 
 ```dockerfile
-FROM node:24-alpine
+# 国内镜像源预先写死，构建机不用先配 daemon.json
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:24-alpine
+FROM ${NODE_IMAGE}
 
-# tzdata 必装：alpine 默认没有时区文件
-RUN apk add --no-cache tzdata
+# tzdata 必装：alpine 默认没有时区文件；Alpine 官方 CDN 在国内慢，先换源
+# su-exec：入口脚本从 root 降回 node 用，比 gosu 小
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories \
+ && apk add --no-cache tzdata su-exec
 
 WORKDIR /app
 
 # 先拷依赖清单，利用层缓存：只改业务代码时不会重装依赖
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --no-audit --no-fund --registry=${NPM_REGISTRY}
 
 COPY . .
 
@@ -1384,7 +1393,11 @@ ENV NODE_ENV=production \
     MAX_UPLOAD_MB=800
 
 RUN mkdir -p /data && chown -R node:node /data
-USER node
+
+# 不写 USER node：入口脚本必须以 root 进来才能修挂载目录属主，
+# 修完立刻用 su-exec 降回 uid 1000 执行业务进程，权限模型不变。
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/data"]
 EXPOSE 8080
@@ -1392,57 +1405,56 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "src/server.js"]
 ```
+
+> 三个网络点（基础镜像 / apk / npm）都预置了国内源：构建机常是临时机器，让人先改 `daemon.json` 等于把「能不能构建」托付给环境配置。要回退官方源用 `--build-arg NODE_IMAGE=node:24-alpine`。
 
 几个刻意的选择：
 
 | 选择 | 原因 |
 |---|---|
-| `node:24-alpine` | 内置 `node` 用户（uid 1000），非 root 开箱可用 |
+| `node:24-alpine`（经国内代理站） | 内置 `node` 用户（uid 1000），非 root 开箱可用；直连 Hub 在国内常被限速到几十 KB/s |
+| `apk` 换阿里云源 | 官方 CDN 同样慢，不换源这层能卡几分钟 |
+| `npm ci --registry=npmmirror` | 依赖虽少，走国内源稳定；公司私服可用 build-arg 覆盖 |
 | `npm ci` 而不是 `npm install` | 严格按 lock 文件装，构建可复现；`install` 可能偷偷升级次版本 |
 | `--omit=dev` | 不带 nodemon 等开发依赖，镜像更干净 |
 | 先 COPY package\*.json 再 COPY 源码 | 只改代码时复用依赖层，构建从 2 分钟降到 5 秒 |
-| `USER node` | 与宿主机挂载目录属主对齐，避免上传时 `EACCES` |
+| `ENTRYPOINT` 修属主后 `su-exec` 降权 | 挂载目录属主由宿主机决定，忘了 `chown 1000:1000` 就是 `EACCES: mkdir '/data/releases'`。入口脚本兜底：可写则直接降权，不可写先 chown，chown 也失败（Windows 盘 / NFS）则告警后退回 root 运行 |
 | HEALTHCHECK 用 `node -e fetch` | alpine 里的 busybox wget 可用，但 node 自带 fetch 更稳 |
 
 **不要用多阶段构建**。纯 JS 没有编译产物，多阶段只会多一层 `node_modules` 复制，收益为零。
 
-### 6.4 docker-compose.yml
+### 6.4 部署命令（`docker run`）
 
-```yaml
-services:
-  online-exe:
-    image: online-exe:${IMAGE_TAG:-1.0.0}
-    container_name: online-exe
-    restart: unless-stopped
-    stop_grace_period: 45s        # 必须大于 shutdown 里等 inflight 的 30s
-    # 宿主网络：容器内 remoteAddress 才是真实客户端 IP。
-    # host 模式下 `ports` 映射无效（写了也不生效），端口由应用自己监听 PORT=8080
-    network_mode: host
-    environment:
-      TZ: Asia/Shanghai
-      MAX_UPLOAD_MB: "800"
-      KEEP_PER_PLATFORM: "5"
-      ADMIN_ALLOW_CIDR: "10.20.0.0/16"
-      NODE_ENV: production
-    volumes:
-      - /srv/online_exe/data:/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
+**仓库不提供 `docker-compose.yml`**，部署只有这一条命令：
+
+```bash
+docker run -d --name online-exe \
+  --network host \
+  --restart unless-stopped \
+  --stop-timeout 45 \
+  -e TZ=Asia/Shanghai -e PORT=8080 -e DATA_DIR=/data \
+  -e MAX_UPLOAD_MB=800 -e KEEP_PER_PLATFORM=5 \
+  -e ADMIN_ALLOW_CIDR=10.20.0.0/16 \
+  -v /srv/online_exe/data:/data \
+  --log-driver json-file --log-opt max-size=20m --log-opt max-file=3 \
+  online-exe:1.0.0
 ```
 
-`IMAGE_TAG` 走变量而不是写死：升级时改 `.env` 里的 `IMAGE_TAG=1.0.1`，`docker compose up -d` 完成替换。
+为什么不用 compose：`docker save` 只导出镜像，`docker-compose.yml` 是仓库文件，永远不会随 tar 到服务器。维护两套（compose 与 run）必然漂移，而实际交付路径只有「tar 拷进去 → load → run」这一条，所以只留一套。
 
-**为什么用 `network_mode: host`。** 见 4.8 的说明——默认 bridge + `ports` 映射在部分环境下会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 双双失真，而这俩恰好是本方案仅有的两道"谁能操作/谁传的"防线。
+| 参数 | 值 | 为什么 |
+|---|---|---|
+| `--network host` | — | 见 4.8：默认 bridge + `-p` 在部分环境下会把源 IP 换成 docker 网关，`ADMIN_ALLOW_CIDR` 和 `uploaded_ip` 双双失真，而这俩恰好是本方案仅有的两道"谁能操作/谁传的"防线 |
+| `--stop-timeout 45` | 45 秒 | 必须大于 shutdown 里等 inflight 的 30s；默认 10s 会被 SIGKILL 硬砍 |
+| `-v /srv/online_exe/data:/data` | — | 不挂卷 = `docker rm` 后版本记录全丢 |
+| `--restart unless-stopped` | — | 宿主机重启后自动拉起 |
+| `--log-driver json-file --log-opt …` | 20m × 3 | 容器日志默认无限增长，能在几个月内把磁盘写满——「莫名其妙磁盘满了」的常见来源 |
+| `-e ADMIN_ALLOW_CIDR` | 实例网段 | 填错管理页直接 403。**必须包含构建机网段**，否则 CI 上传被自己的防护挡掉；本地 WSL 调试一般填 `172.24.0.0/16` |
+
+升级 = 导入新 tag 后 `docker rm -f online-exe` 再跑同一条命令。数据在卷里，版本记录和包都不丢。
 
 host 模式的代价与对策：
 
@@ -1455,16 +1467,12 @@ host 模式的代价与对策：
 
 **如果运维坚持用 bridge**（比如统一网络规划），那必须做两件事：① 按 4.8 的验证命令实测源 IP；② 实测发现源 IP 是网关地址时，`ADMIN_ALLOW_CIDR` 要么留空，要么填网关网段——但那样等于没保护，此时应改为「靠上游防火墙限制 8080 的来源」，而不是靠应用层。
 
-`ADMIN_ALLOW_CIDR` 记得改成实际网段，填错管理页直接 403。**别忘了把构建机网段算进去**，否则 CI 上传会被自己的防护挡掉。
-
-`logging` 那两行别省。容器日志默认无限增长，能在几个月内把磁盘写满——这是「莫名其妙磁盘满了」的常见来源。
-
 ### 6.5 九个容器坑
 
 | # | 坑 | 现象 | 处置 |
 |---|---|---|---|
 | 1 | **数据没挂卷** | `docker rm` 后版本记录归零 | 必须 `-v /srv/online_exe/data:/data` |
-| 2 | **文件权限** | 上传报 `EACCES`，宿主机改不动文件 | 容器内 `node`（uid 1000），宿主机目录 `chown -R 1000:1000` |
+| 2 | **文件权限** | 容器起不来：`EACCES: permission denied, mkdir '/data/releases'` | 挂载目录属主不是 uid 1000。入口脚本会自动 `chown` 后降权；若挂载点在 Windows 盘 / NFS 则 chown 无效，改用命名卷或 ext4 路径 |
 | 3 | **大文件被掐断** | 传 400MB 上传到一半连接重置 | `server.requestTimeout = 0`（Node 默认 300 秒） |
 | 4 | **大文件被 413** | 若前置 Nginx，直接 413 | 宿主机 Nginx 的 `client_max_body_size` 默认 1MB |
 | 5 | **时区差 8 小时** | 页面时间和日志全是 UTC | `TZ=Asia/Shanghai` + 镜像内装 tzdata |
@@ -1533,7 +1541,7 @@ host 模式的代价与对策：
 | **管理页** | `/admin` | **B** | `views/admin.ejs`、`public/admin.css`、`public/admin.js`、`src/routes/pages/admin.js`、`src/routes/upload.js`、`src/routes/releases.js` | Chrome/Edge 内跑完上传→核对→撤回→删除，不跳页 |
 | **数据底座** | — | **A** | `src/semver.js`、`src/catalog/`、`src/storage/`、`src/routes/index.js`、`src/middleware/cidr.js` | `catalog` 六个方法签名不漂移 |
 | **运行时 + 横切** | — | **B** | `src/config.js`、`src/app.js`、`src/server.js`、`src/middleware/errors.js`、`src/routes/dto.js` | 进程不死、超时正确、错误格式统一 |
-| **部署** | — | **B** | `Dockerfile`、`docker-compose.yml`、`.dockerignore`、离线 `save/load` | 一条 `docker compose up -d` 起得来 |
+| **部署** | — | **B** | `Dockerfile`、`docker-entrypoint.sh`、`.dockerignore`、离线 `save/load` | 一条 `docker run` 起得来，忘 `chown` 也不 EACCES |
 | **公共样式** | — | 阶段 0 一起写 | `public/base.css`（重置 + 字体 + 顶部导航，约 60 行） | 冻结后不改，改要通知 |
 
 底座为什么这么对半分：A 拿的是「数据长什么样、怎么落盘」，B 拿的是「进程怎么活、响应长什么样、部署怎么起」。两边都不碰对方的文件，但各自的页面都能独立跑通。
@@ -1615,7 +1623,7 @@ host 模式的代价与对策：
 | **A 合计** | | **约 1380 行** |
 | B · 运行时 | config 60 + app 40 + server 60 + errors 50 + dto 40 | 250 |
 | B · 管理页 | pages/admin 130 + admin.ejs 200 + admin.js 70 + admin.css 110 + upload 260 + releases 150 | 920 |
-| B · 部署 | Dockerfile / compose / .dockerignore 80 + fixtures & 验收脚本 70 | 150 |
+| B · 部署 | Dockerfile / entrypoint / .dockerignore 110 + fixtures & 验收脚本 70 | 180 |
 | **B 合计** | | **约 1320 行** |
 
 两边差 60 行，可以忽略。**真正要盯的不是行数，是阻塞关系**：A 的 `catalog` 是 B 的依赖，A 停 B 就停。两条解耦措施已经在 7.4 里落地：
@@ -1755,7 +1763,7 @@ host 模式的代价与对策：
 1. **单包大小：已确认 300–400MB。** 据此定档 `MAX_UPLOAD_MB=800`、`KEEP_PER_PLATFORM=5`、数据盘 100GB，预算推导见 4.9。
 2. **内网有多少人要下载？** 十几个人，Express 直出完全够；上百人同时拉，再考虑前置 Nginx 托管静态文件。
 3. **服务端口 8080 是否被占？** 开工前确认。
-4. **内网 Docker / Compose 版本？** compose 用的是 v2 语法，需要 Docker Compose v2。
+4. **内网 Docker 版本？** 需要 Docker 20.10+（镜像用了 `HEALTHCHECK`、`ENTRYPOINT` 与 `--stop-timeout`）；不要求装 Compose。
 5. **宿主机有没有独立数据盘挂 `/srv/online_exe/data`？** 单包 400MB、保留 5 版需要约 16GB，加并发峰值与余量按 **100GB** 规划；只有根分区 60GB 时把 `KEEP_PER_PLATFORM` 降到 3。
 6. **两人各自能不能独立写服务端？** 能 → 按 7.3 页面竖切；有一人只会前端 → 退到 7.10 的横切方案。
 7. **管理页的来源网段是什么？** 填 `ADMIN_ALLOW_CIDR`，填错管理页直接 403；**构建机网段也要算进去**，否则 CI 上传 403。
