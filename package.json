@@ -5,7 +5,7 @@
   "type": "module",
   "description": "内网客户端发版平台 · 上传页与下载页",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "start": "node server.js",
