@@ -32,10 +32,16 @@ export async function renderAdmin(req, res, next) {
       storage.orphanStats().catch(() => ({ count: 0, bytes: 0 })),
     ])
 
-    const rows = sortReleases(filterReleases(all.slice(), { status, platform })).map((r) => ({
+    // 行数据：**不再按筛选裁掉**，一次把所有记录都给前端。
+    // 为什么：切筛选走整页刷新会让页面跳位/抖动——滚动位置被重置，列表变短时
+    // 纵向滚动条出现/消失还会引起整行重排。改成前端显隐 <tr>，URL 用 replaceState 同步。
+    // 服务端仍然算出「当前 URL 下哪些行可见」，模板据此打初始隐藏标记，
+    // 这样首屏和刷新后的结果与服务端筛选口径完全一致，也不会出现「先全显示再闪一下」。
+    const rows = sortReleases(all.slice()).map((r) => ({
       ...toReleaseDto(r),
       downloads: stats.get(r.id),
     }))
+    const visibleIds = new Set(filterReleases(all, { status, platform }).map((r) => r.id))
 
     // 覆盖度提示：同一版本号已覆盖哪些「在架且文件在」的组合。
     // 只提示不阻止提交 —— 强制齐套会挡住「这次只修 macOS bug」这种合法场景。
@@ -87,6 +93,7 @@ export async function renderAdmin(req, res, next) {
         orphan,
       },
       rows,
+      visibleIds,
       coverage,
       suggestions,
       groups: PLATFORM_GROUPS,

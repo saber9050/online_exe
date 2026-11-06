@@ -1,5 +1,13 @@
 /* 管理页样式。只在 Chrome / Edge 使用，无需兼容 IE11。 */
 
+/* 常驻纵向滚动条：切筛选后列表变短时，滚动条一旦消失，整张表会横向重排——
+   肉眼看到的就是「抖一下」。把滚动条槽固定住，行宽就不变了 */
+html { overflow-y: scroll; }
+
+/* 前端筛选隐藏行。对 <tr> 用 class 而不是 hidden 属性，避免个别浏览器
+   对表格行 display 处理不一致 */
+.row-hidden { display: none; }
+
 main.wrap { padding-top: 24px; }
 
 /* 状态条 */

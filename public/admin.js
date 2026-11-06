@@ -10,40 +10,6 @@
 
   function $(id) { return document.getElementById(id) }
 
-  // ── 页面位置保持 ──────────────────────────────────────────────
-  // 筛选切换是真正的页面导航，只能用「提交前记位置、加载后还原」。
-  // 撤回/恢复/删除已经改成局部更新（见 applyStatus / removeRow），不再触发导航。
-  var SCROLL_KEY = 'online-exe-scroll'
-
-  // 关掉浏览器自带的滚动恢复，否则它会和下面的还原抢，位置会先跳一下再回来
-  try {
-    if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
-  } catch (e) { /* 老浏览器忽略 */ }
-
-  function rememberScroll() {
-    try {
-      sessionStorage.setItem(
-        SCROLL_KEY,
-        String(window.pageYOffset || document.documentElement.scrollTop || 0)
-      )
-    } catch (e) { /* 隐私模式忽略 */ }
-  }
-
-  function restoreScroll() {
-    var y = 0
-    try {
-      y = Number(sessionStorage.getItem(SCROLL_KEY) || 0)
-      sessionStorage.removeItem(SCROLL_KEY)
-    } catch (e) {
-      return
-    }
-    if (!y) return
-    // 等一帧再滚：表格高度受字体渲染影响，太早 scrollTo 会被后面涨上来的内容顶偏
-    requestAnimationFrame(function () {
-      window.scrollTo(0, Math.min(y, document.body.scrollHeight))
-    })
-  }
-
   var form = $('upload-form')
   if (!form) return
 
@@ -382,35 +348,90 @@
     }
   }
 
-  /** 当前筛选下这一行还该不该出现（只用来提示，不真的删行） */
-  function matchesFilter(tr, status) {
-    var sel = document.querySelector('#filter-form select[name="status"]')
-    var f = sel ? sel.value : 'all'
-    var isBeta = (tr.querySelector('.tag') || {}).textContent === 'Beta'
-    var missing = tr.getAttribute('data-missing') === '1'
+  // ── 前端筛选 ──────────────────────────────────────────────────
+  // 切筛选不再整页刷新：所有行都已经在 DOM 里，只切 row-hidden 的显隐。
+  // 为什么必须这样：整页刷新会重置滚动位置（页面跳一下），列表变短时纵向滚动条
+  // 消失还会让整张表横向重排 —— 这两件事叠起来就是肉眼可见的「抖动」。
+  // URL 用 replaceState 同步，刷新页面或分享链接时，服务端仍按参数渲染同样的结果。
 
-    if (f === 'all') return status !== 'deleted'
-    if (f === 'stable') return status === 'active' && !isBeta
-    if (f === 'prerelease') return status === 'active' && isBeta
-    if (f === 'yanked') return status === 'yanked'
-    if (f === 'missing') return missing && status !== 'deleted'
-    if (f === 'deleted') return status === 'deleted'
+  function currentFilter() {
+    var form = $('filter-form')
+    var s = form && form.querySelector('select[name="status"]')
+    var p = form && form.querySelector('select[name="platform"]')
+    return { status: s ? s.value : 'all', platform: p ? p.value : 'all' }
+  }
+
+  /** 这一行在该筛选下是否该出现。规则与 src/routes/releases.js 的 STATUS_FILTERS 一一对应 */
+  function rowMatches(tr, f) {
+    var status = tr.getAttribute('data-status')
+    var missing = tr.getAttribute('data-missing') === '1'
+    var beta = tr.getAttribute('data-prerelease') === '1'
+    var platform = tr.getAttribute('data-platform')
+
+    if (f.platform !== 'all' && platform !== f.platform) return false
+    if (f.status === 'all') return status !== 'deleted'
+    if (f.status === 'stable') return status === 'active' && !beta
+    if (f.status === 'prerelease') return status === 'active' && beta
+    if (f.status === 'yanked') return status === 'yanked'
+    if (f.status === 'missing') return status !== 'deleted' && missing
+    if (f.status === 'deleted') return status === 'deleted'
     return true
+  }
+
+  function allRows() {
+    var body = $('list-body')
+    return body ? body.querySelectorAll('tr[data-id]') : []
+  }
+
+  function updateEmpty() {
+    var box = $('list-empty')
+    if (!box) return
+    var rows = allRows()
+    var visible = 0
+    for (var i = 0; i < rows.length; i++) {
+      if (!rows[i].classList.contains('row-hidden')) visible++
+    }
+    box.hidden = visible > 0
+  }
+
+  /** @param {boolean} syncUrl 是否同步地址栏（首屏加载传 false，避免多一条历史记录） */
+  function applyFilter(syncUrl) {
+    var f = currentFilter()
+    var rows = allRows()
+
+    for (var i = 0; i < rows.length; i++) {
+      var show = rowMatches(rows[i], f)
+      rows[i].classList.toggle('row-hidden', !show)
+      if (show) {
+        // 之前因为「刚操作完但不符合筛选」被淡化的行，重新可见时恢复原样
+        rows[i].classList.remove('row-stale')
+        rows[i].removeAttribute('title')
+      }
+    }
+    updateEmpty()
+
+    if (!syncUrl) return
+    var params = []
+    if (f.platform !== 'all') params.push('platform=' + encodeURIComponent(f.platform))
+    if (f.status !== 'all') params.push('status=' + encodeURIComponent(f.status))
+    try {
+      history.replaceState(null, '', location.pathname + (params.length ? '?' + params.join('&') : ''))
+    } catch (e) { /* 不支持时忽略，不影响筛选本身 */ }
   }
 
   /**
    * 改完状态后，若已不符合当前筛选，把行淡化并说明原因。
-   * 为什么不直接删掉：用户刚点的就是这一行，立刻消失等于「操作完看不见结果」。
-   * 留到下次刷新再消失，既给了反馈，又不破坏筛选语义。
+   * 为什么不直接隐藏：用户刚点的就是这一行，立刻消失等于「操作完看不见结果」。
+   * 留到下次切筛选再隐藏，既给了反馈，又不破坏筛选语义。
    */
   function refreshStale(tr, status) {
-    if (matchesFilter(tr, status)) {
+    if (rowMatches(tr, currentFilter())) {
       tr.classList.remove('row-stale')
       tr.removeAttribute('title')
       return
     }
     tr.classList.add('row-stale')
-    tr.title = '已' + (status === 'yanked' ? '撤回' : '恢复') + '，不在当前筛选内，刷新后不再显示'
+    tr.title = '已' + (status === 'yanked' ? '撤回' : '恢复') + '，不在当前筛选内，切换筛选后不再显示'
   }
 
   function patchStatus(id, status, btn) {
@@ -455,8 +476,6 @@
   function removeRow(tr, btn) {
     var size = Number(tr.getAttribute('data-size') || 0)
     var missing = tr.getAttribute('data-missing') === '1'
-    var wrap = tr.closest('.table-wrap')
-    var tbody = tr.parentNode
 
     tr.parentNode.removeChild(tr)
 
@@ -472,10 +491,8 @@
       }
     }
 
-    // 删空了给个占位，否则只剩表头，看着像页面坏了
-    if (wrap && tbody && !tbody.querySelector('tr[data-id]')) {
-      wrap.outerHTML = '<p class="empty">当前筛选下没有版本。</p>'
-    }
+    // 删到当前筛选一行不剩时给出占位，否则只剩表头看着像页面坏了
+    updateEmpty()
     if (btn) btn.disabled = false
   }
 
@@ -540,18 +557,20 @@
     }
   })
 
-  // 筛选器变更即提交。提交是一次真正的页面导航，先把当前位置记下来，
-  // 加载后由 restoreScroll() 还原 —— 否则每换一个筛选就被拽回页面顶部。
+  // 筛选：全部在前端完成，不提交表单、不刷新页面。
+  // 表单仍保留 method=get（JS 被禁时还能用），但这里拦掉默认提交。
   var filterForm = $('filter-form')
   if (filterForm) {
-    filterForm.addEventListener('submit', rememberScroll)
+    filterForm.addEventListener('submit', function (e) {
+      e.preventDefault()
+      applyFilter(true)
+    })
     Array.prototype.forEach.call(filterForm.querySelectorAll('select'), function (s) {
-      s.addEventListener('change', function () {
-        rememberScroll()
-        filterForm.submit()
-      })
+      s.addEventListener('change', function () { applyFilter(true) })
     })
   }
+  // 首屏不重算 URL：服务端已经按 URL 参数打好了 row-hidden，这里只补空态兜底
+  applyFilter(false)
 
   // 上传成功后高亮新增行 3 秒
   var flashId = null
@@ -567,9 +586,6 @@
       setTimeout(function () { tr.classList.remove('row-flash') }, 3000)
     }
   }
-
-  // 还原筛选切换前的滚动位置（没有记录就什么都不做，保持原来的置顶行为）
-  restoreScroll()
 
   // ── 孤儿文件：懒加载 / 单个删除 / 全部清理 ─────────────────────────────
   // 孤儿 = 磁盘上有、版本记录里没有的文件（启动对账把它们移入 data/orphan/ 待确认）。
