@@ -18,6 +18,10 @@
 | 相对路径 | 响应里的 `download_url` 是相对路径（`/dl/...`），调用方自己拼 host |
 | 错误格式 | 业务错误统一 `{ "error": "中文说明" }`；**例外见 §1.1** |
 
+> **本文示例统一用 PowerShell 写**（Windows 本机验证）：`curl.exe` 负责 multipart 与看状态码，`Invoke-RestMethod` 负责取 JSON。
+> 记住三点：PowerShell 里 `curl` 是别名，必须写 **`curl.exe`**；续行是反引号不是 `\`；PS 5.1 没有 `&&`。
+> CI 在 Linux 上跑，用 §12 的 sh 片段。
+
 ### 1.1 一个格式例外
 
 | 场景 | 实际响应 | 说明 |
@@ -70,8 +74,8 @@ Docker `HEALTHCHECK` 与运维巡检用。**不是** `res.send('ok')` 那种假�
 | 成功 | `200` + `text/plain`: `ok` |
 | 失败 | `503` + `text/plain`: `storage unavailable` |
 
-```bash
-curl -i http://127.0.0.1:8080/healthz
+```powershell
+curl.exe -i http://127.0.0.1:8080/healthz
 ```
 
 **失败判据**：`DATA_DIR` 不存在、只读、磁盘满、属主不对（`EACCES`）。探针文件写在 `DATA_DIR` 根下，不写进 `releases/`——写进去会被启动对账当成孤儿文件。
@@ -144,15 +148,16 @@ curl -i http://127.0.0.1:8080/healthz
 
 ### 4.3 示例
 
-```bash
+```powershell
 # 全部（不含墓碑）
-curl -s "http://127.0.0.1:8080/api/releases" | jq '.releases | length'
+(Invoke-RestMethod http://127.0.0.1:8080/api/releases).releases.Count
 
 # 只看缺文件的
-curl -s "http://127.0.0.1:8080/api/releases?status=missing" | jq '.releases[].version'
+(Invoke-RestMethod "http://127.0.0.1:8080/api/releases?status=missing").releases.version
 
-# 只看 Win7
-curl -s "http://127.0.0.1:8080/api/releases?platform=windows7&status=stable"
+# 只看 Win7 正式版
+(Invoke-RestMethod "http://127.0.0.1:8080/api/releases?platform=windows7&status=stable").releases |
+  Select-Object version, arch, size, downloads
 ```
 
 ---
@@ -258,24 +263,28 @@ Body 是一条 Release DTO（**不含** `downloads`）：
 
 `409` 带 `existing` 时前端会自动把版本号 patch +1（`1.3.0` → `1.3.1`），CI 请自己处理这个分支。
 
-### 5.6 curl 示例
+### 5.6 curl 示例（PowerShell）
 
-```bash
+> PowerShell 里 `curl` 是别名，必须写 **`curl.exe`**；续行用反引号。
+
+```powershell
 # 标准上传
-curl -X POST "http://10.20.3.10:8080/api/releases?version=1.3.0&platform=windows10&arch=x64" \
-  -F "changelog=修复登录闪退；启动速度优化 30%" \
-  -F "file=@dist/CoreRunner-1.3.0-win10-x64.exe"
+curl.exe -X POST "http://10.20.3.10:8080/api/releases?version=1.3.0&platform=windows10&arch=x64" `
+  -F "changelog=fix login crash" `
+  -F "file=@F:/tmp/pkg/CoreRunner-1.3.0-win10-x64.exe"
 
-# 只看状态码（CI 脚本）
-code=$(curl -s -o /tmp/resp.json -w '%{http_code}' \
-  -X POST "http://10.20.3.10:8080/api/releases?version=$V&platform=$P&arch=$A" \
-  -F "file=@$PKG")
-[ "$code" = "201" ] || { echo "上传失败 $code: $(cat /tmp/resp.json)"; exit 1; }
+# 只看状态码（脚本里判成功）
+$code = curl.exe -s -o NUL -w '%{http_code}' -X POST `
+  "http://10.20.3.10:8080/api/releases?version=$V&platform=$P&arch=$A" `
+  -F "file=@$PKG"
+if ($code -ne '201') { "上传失败 HTTP $code" }
 
 # 带进度（大包手动传）
-curl --progress-bar -X POST "http://10.20.3.10:8080/api/releases?version=1.4.0&platform=macos&arch=arm64" \
-  -F "file=@dist/app-1.4.0-arm64.dmg"
+curl.exe --progress-bar -X POST "http://10.20.3.10:8080/api/releases?version=1.4.0&platform=macos&arch=arm64" `
+  -F "file=@F:/tmp/pkg/app-1.4.0-arm64.dmg"
 ```
+
+CI 里跑的是 Linux，用 sh 版（见 §12）。
 
 ---
 
@@ -293,23 +302,34 @@ curl --progress-bar -X POST "http://10.20.3.10:8080/api/releases?version=1.4.0&p
 
 返回更新后的完整 DTO。
 
-```bash
-# 撤回
-curl -X PATCH "http://127.0.0.1:8080/api/releases/20261105T021000-1f3a9c7e" \
-  -H "Content-Type: application/json" -d '{"status":"yanked"}'
+```powershell
+# 撤回（成功路径用 Invoke-RestMethod 最省事：直接拿到解析后的对象）
+$id = '20261105T021000-1f3a9c7e'
+$r = Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/releases/$id" `
+  -Method Patch -ContentType "application/json" -Body '{"status":"yanked"}'
+$r.status        # yanked
 
 # 恢复
-curl -X PATCH "http://127.0.0.1:8080/api/releases/20261105T021000-1f3a9c7e" \
-  -H "Content-Type: application/json" -d '{"status":"active"}'
+(Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/releases/$id" `
+  -Method Patch -ContentType "application/json" -Body '{"status":"active"}').status
 ```
+
+> 想看 400/404 的原始响应，`Invoke-RestMethod` 不行（遇 4xx 直接抛异常，看不到 body）。
+> PS 5.1 还有第二个坑：给原生程序传带引号的 JSON 会掉引号。**把 body 写成文件**再发最稳：
+>
+> ```powershell
+> '{"status":"x"}' | Set-Content F:\tmp\body.json -Encoding ascii -NoNewline
+> curl.exe -i -X PATCH "http://127.0.0.1:8080/api/releases/$id" `
+>   -H "Content-Type: application/json" --data-binary "@F:/tmp/body.json"
+> ```
 
 ### 6.2 冻结表里的 POST 别名
 
 方案 7.4 冻结的是 `POST /:id/yank`、`POST /:id/unyank`。这两条路由已实现，与 `PATCH` **共用同一份实现**，返回体完全一致：
 
-```bash
-curl -X POST http://127.0.0.1:8080/api/releases/<id>/yank     # 等同 PATCH {"status":"yanked"}
-curl -X POST http://127.0.0.1:8080/api/releases/<id>/unyank   # 等同 PATCH {"status":"active"}
+```powershell
+curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/yank"   # 等同 PATCH {"status":"yanked"}
+curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/unyank" # 等同 PATCH {"status":"active"}
 ```
 
 管理页前端用 `PATCH`（一次请求同时表达两个方向），CI 或脚本按冻结表用 `POST` 也行。两条路都留着不是历史包袱，是为了让「契约以冻结表为准」和「前端不必跟着改一轮」同时成立。
@@ -347,8 +367,12 @@ curl -X POST http://127.0.0.1:8080/api/releases/<id>/unyank   # 等同 PATCH {"s
 | `404` | `版本记录不存在` | `id` 不存在 |
 | `409` | `该版本已删除` | 重复删除 |
 
-```bash
-curl -X DELETE "http://127.0.0.1:8080/api/releases/20261105T021000-1f3a9c7e"
+```powershell
+# 删除（成功路径）
+(Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/releases/$id" -Method Delete).status   # deleted
+
+# 重复删除看 409 原文
+curl.exe -i -X DELETE "http://127.0.0.1:8080/api/releases/$id"
 ```
 
 ### 7.2 为什么不是真删
@@ -395,10 +419,15 @@ curl -X DELETE "http://127.0.0.1:8080/api/releases/20261105T021000-1f3a9c7e"
 | `400` | `path` 指向的是目录（只允许删文件，递归删目录破坏面太大） |
 | `404` | 文件不存在（可能已被另一个标签页删掉） |
 
-```bash
-curl -s http://127.0.0.1:8080/api/orphans | jq
-curl -X DELETE "http://127.0.0.1:8080/api/orphans?path=9.9.9__linux-x64__package.bin.1762290000000"
-curl -X DELETE http://127.0.0.1:8080/api/orphans
+```powershell
+# 列出（count / bytes / 明细）
+Invoke-RestMethod http://127.0.0.1:8080/api/orphans
+
+# 删单个（path 用 GET 里拿到的原值）
+curl.exe -s -X DELETE "http://127.0.0.1:8080/api/orphans?path=9.9.9__linux-x64__package.bin.1762290000000"
+
+# 清空
+curl.exe -s -X DELETE http://127.0.0.1:8080/api/orphans
 ```
 
 **调用方注意**：这两个接口删的是真文件，没有墓碑、不能恢复。管理页对单个删除和清空都做了二次确认；脚本调用请自己保证 `path` 是从 `GET` 里拿到的原值，不要自己拼。
@@ -503,13 +532,14 @@ upload macos     arm64 dist/CoreRunner-$VER-arm64.dmg
 
 三个注意点：
 
-1. **`ADMIN_ALLOW_CIDR` 必须包含构建机网段**，否则 CI 拿到的是一段纯文本 403，看起来像「服务没起来」
+1. **`ADMIN_ALLOW_CIDR` 必须包含构建机网段**，否则 CI 拿到的是 `403 {"error":"该来源网段无权访问管理页"}`，而脚本第一反应是「服务没起来」
 2. `409` 在 CI 里应当视为「已发布过」而不是失败，按需 `SKIP`
 3. `changelog` 含中文时确保脚本文件 UTF-8，`curl -F` 会按原字节发出
+4. 本机手动验时用 PowerShell（见 §5.6/§6.1），CI 里用下面这段 sh
 
 ### 12.1 本地自测
 
-```bash
+```powershell
 npm test        # = node scripts/test-b.mjs
 ```
 

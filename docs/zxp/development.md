@@ -39,9 +39,9 @@
 
 | # | 文件 | 行数（约） | 一句话职责 | 出错的后果 |
 |---|---|---|---|---|
-| 1 | `src/config.js` | 33 | 环境变量装载、派生路径 | 路径错 → 数据写错地方 |
+| 1 | `src/config.js` | 34 | 环境变量装载、派生路径 | 路径错 → 数据写错地方 |
 | 2 | `src/app.js` | 34 | Express 实例、中间件顺序、路由挂载点 | 顺序错 → 大上传被打断 / 鉴权漏 |
-| 3 | `src/server.js` | 67 | 四个超时、IPv4 监听、优雅退出 | 超时没关 → 400MB 必断 |
+| 3 | `src/server.js` | 76 | 启动自检、四个超时、IPv4 监听、优雅退出 | 超时没关 → 400MB 必断 |
 | 4 | `src/middleware/errors.js` | 30 | 404 + 按 `err.status` 输出统一错误 | 报错格式不统一，前端解析炸 |
 | 5 | `src/routes/dto.js` | 29 | 磁盘结构 → HTTP 结构映射 | 磁盘 JSON 被响应格式污染 |
 | 6 | `src/routes/upload.js` | 330 | busboy 流式上传、查重、并发、空间预检 | 内存爆 / 进程被未捕获异常打死 |
@@ -52,7 +52,7 @@
 | 11 | `public/admin.css` | 141 | 管理页样式（不用 CSS 变量 / Grid） | — |
 | 12 | `public/admin.js` | 533 | 上传进度、409 自动 +1、行操作、孤儿面板 | 发版人重复填 8 遍表单 |
 | 13 | `scripts/test-b.mjs` | 506 | 接口冒烟测试（`npm test`，74 条断言） | 改完不知道有没有弄坏别的 |
-| 14 | `Dockerfile` / `docker-compose.yml` / `.dockerignore` | 29 / 28 / 10 | 单容器交付 | 内网起不来 / 数据丢失 |
+| 14 | `Dockerfile` / `docker-compose.yml` / `.dockerignore` | 29 / 28 / 13 | 单容器交付 | 内网起不来 / 数据丢失 |
 
 > `src/routes/index.js` 归 A，本次为补齐 `yank`/`unyank`/`orphans` 路由改了 6 行，已同步告知。
 
@@ -113,7 +113,18 @@
 | `src/semver.js` | `compareVersion(a, b)` | 列表排序、清理建议 |
 | `src/constants.js` | `PLATFORM_ARCH_SET` / `PLATFORM_GROUPS` / `platformLabel` / `archLabel` / `comboLabel` | 白名单校验 + 中文展示 |
 | `src/middleware/cidr.js` | `adminGuard` | 我不用，但**依赖它挂在 `/api` 上** |
-| `src/server.js` | `initStore()` | `src/server.js` 启动第 0 步（A 实现：建目录 / 三态加载 / 清 tmp / 对账） |
+| `src/server.js` | `initStore()`（模块内私有） | 启动第 0 步。**目录迁移后它从 `lib/store.js` 搬进了 `server.js`**，成了我的文件，但实现仍是调 A 的四个函数：`ensureDirs → loadReleases → cleanupTmp → reconcile`，末尾再 `stats.load()` |
+
+启动自检的五步顺序（写错就会出现「空目录起不来」或「孤儿文件被当成正常版本」）：
+
+```text
+ensureDirs()      建 data/、data/releases/、data/orphan/
+loadReleases()    三态加载：不存在 → 空结构；JSON 语法错 → 拒绝启动；缺字段 → 补默认
+catalog.load()    内存索引换掉
+cleanupTmp()      递归删 **/*.tmp
+reconcile()       孤儿移走、缺文件标 file_missing（跳过墓碑）
+stats.load()      装载 stats.json，下载计数接着算
+```
 
 ---
 
@@ -133,7 +144,13 @@
 | `ADMIN_ALLOW_CIDR` | 空 | **支持逗号分隔多网段**；空 = 不限制 |
 | `STATS_FLUSH_SEC` | `30` | 下载计数落盘间隔 |
 
-路径一律从 `import.meta.dirname` 派生（`root = import.meta.dirname`），**不用 `process.cwd()`**：ESM 里没有 `__dirname`，而 `cwd` 在 `docker exec`、systemd、换工作目录时会变，表现为静态资源静默 404。
+路径一律从 `import.meta.dirname` 派生，**不用 `process.cwd()`**：ESM 里没有 `__dirname`，而 `cwd` 在 `docker exec`、systemd、换工作目录时会变，表现为静态资源静默 404。
+
+目录迁移到 `src/` 后这里有个小坑——`config.js` 在 `src/` 下，项目根是**上一级**：
+
+```js
+const root = path.join(import.meta.dirname, '..')   // 少这一级，views/ 和 public/ 全会 404
+```
 
 ### 3.2 `src/app.js`：中间件顺序不能动
 
@@ -348,36 +365,47 @@ tasks.push((async () => { … })().catch((err) => { taskErrors.push(err); …; r
 
 不要在状态码上写三元套三元。`DUPLICATE` 有两个来源：入口同步查重（带 `existing` DTO）和队列内再次查重（不带），前端按 `existing` 是否存在决定要不要自动 +1。
 
-### 5.8 联调命令
+### 5.8 联调命令（PowerShell）
 
-```bash
+> PowerShell 里 `curl` 是 `Invoke-WebRequest` 的别名，**必须写 `curl.exe`**；续行用反引号，不是 `\`。
+
+```powershell
 # 正常上传（元数据在 query，changelog 在 multipart）
-curl -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=windows10&arch=x64" \
-  -F "changelog=修复登录闪退" \
-  -F "file=@dist/CoreRunner-1.3.0-win10-x64.exe"
+curl.exe -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=windows10&arch=x64" `
+  -F "changelog=fix login crash" `
+  -F "file=@F:/tmp/pkg/CoreRunner-1.3.0-win10-x64.exe"
 
 # 重复上传 → 409
-curl -i -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=windows10&arch=x64" \
-  -F "file=@dist/CoreRunner-1.3.0-win10-x64.exe"
+curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=windows10&arch=x64" `
+  -F "file=@F:/tmp/pkg/CoreRunner-1.3.0-win10-x64.exe"
 
 # 并发同一版本 → 一个 201 一个 409
-for i in 1 2; do
-  curl -s -o /dev/null -w "%{http_code}\n" -X POST \
-    "http://127.0.0.1:8080/api/releases?version=1.4.0&platform=linux&arch=x64" \
-    -F "file=@big.bin" &
-done; wait
+$jobs = 1..2 | ForEach-Object {
+  Start-Job { curl.exe -s -o NUL -w '%{http_code}' -X POST `
+    "http://127.0.0.1:8080/api/releases?version=1.4.0&platform=linux&arch=x64" `
+    -F "file=@F:/tmp/pkg/big.bin" }
+}
+($jobs | Wait-Job | Receive-Job) -join ','; $jobs | Remove-Job
 
 # 一次传两个文件 → 400
-curl -i -X POST "http://127.0.0.1:8080/api/releases?version=1.4.1&platform=linux&arch=x64" \
-  -F "file=@a.bin" -F "file=@b.bin"
+curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.4.1&platform=linux&arch=x64" `
+  -F "file=@F:/tmp/pkg/a.bin" -F "file=@F:/tmp/pkg/b.bin"
 
 # 上传中断后进程必须还活着
-curl --limit-rate 1M -X POST "http://127.0.0.1:8080/api/releases?version=9.9.9&platform=linux&arch=x64" \
-  -F "file=@big.bin" & sleep 2; kill %1
-curl -s -o /dev/null -w "healthz=%{http_code}\n" http://127.0.0.1:8080/healthz
+$j = Start-Job { curl.exe --limit-rate 1M -X POST `
+  "http://127.0.0.1:8080/api/releases?version=9.9.9&platform=linux&arch=x64" `
+  -F "file=@F:/tmp/pkg/big.bin" }
+Start-Sleep -Seconds 2; Stop-Job $j; Remove-Job $j -Force
+curl.exe -s -o NUL -w 'healthz=%{http_code}' http://127.0.0.1:8080/healthz
 ```
 
-排查 tmp 残留：`find data/releases -name "*.tmp"`。正常情况下一份都不该有——有就是失败路径漏了清理。
+排查 tmp 残留：
+
+```powershell
+Get-ChildItem -Recurse F:\tmp\oe-test\releases -Filter *.tmp
+```
+
+正常情况下一份都不该有——有就是失败路径漏了清理。
 
 ---
 
@@ -568,18 +596,25 @@ host 模式的代价：`ports` 映射失效（应用自己 `listen` 8080）、80
 
 ### 8.3 离线导入流程
 
-```bash
-# 构建机（有外网）
+**构建机（PowerShell 也能跑，有外网的那台）**
+
+```powershell
 docker build -t online-exe:1.0.0 .
 docker save online-exe:1.0.0 -o online-exe-1.0.0.tar
+Get-Item online-exe-1.0.0.tar | Select-Object Name, Length
+```
 
-# 内网服务器
+**内网服务器（Linux，这一步必须是 sh）**
+
+```bash
 docker load -i online-exe-1.0.0.tar
 mkdir -p /srv/online_exe/data
 chown -R 1000:1000 /srv/online_exe/data    # 关键：与容器内 node 用户对齐
 docker compose up -d
 docker compose logs -f
 ```
+
+> Windows 上 `docker save -o` 生成的是 tar 文件，直接拷进内网服务器 `docker load` 即可，不用转换。
 
 镜像版本号（`1.0.0`）是**服务端程序版本**，与客户端 `1.3.0` 无关，别混着叫。
 
@@ -597,7 +632,7 @@ docker compose logs -f
 
 **先跑自动化**：`npm test`（`scripts/test-b.mjs`，74 条断言）。它起真进程、写真磁盘、打真 HTTP，覆盖了上传/查重/并发/超限/墓碑/对账/孤儿/CIDR 的全部接口行为。
 
-**手工用例逐条清单见 [`testing.md`](./testing.md)**（A–I 共 66 条，带命令、期望输出、排错速查）。
+**手工用例逐条清单见 [`testing.md`](./testing.md)**（A–I 共 67 条，PowerShell 命令 + 期望输出 + 排错速查）。
 
 它替代不了的是这四类：真浏览器、真容器、真大包、真网络。所以下面这些还得手工过一遍。带 ★ 的是硬伤用例，不过就别上线。
 
