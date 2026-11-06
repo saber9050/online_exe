@@ -529,7 +529,7 @@ maxUploadMb, keepPerPlatform
 | 6 | 409 自动 +1 | 读 `data.existing.version`，`bumpPatch` 到 `1.3.1` |
 | 7 | 成功高亮 | `sessionStorage['online-exe-flash']` 存 id，重载后给该行加 3 秒高亮 |
 | 8 | 重新上传预填 | `data-action="reupload"` 把版本/平台/架构写回表单并滚到上传区 |
-| 9 | 删除二次确认 | `prompt` 输入版本号，不一致直接取消 |
+| 9 | 删除二次确认 | `window.confirm` 弹框，文案含「版本（平台 · 架构）+ 不可恢复 + 版本号作废 + 提示改用撤回」；**不再要求手打版本号** |
 | 10 | 筛选即提交 | select `change` 触发 `form.submit()` |
 | 11 | 孤儿面板 | 点「查看」才 `GET /api/orphans`（懒加载），逐行删除二次确认，全部清理后整页刷新；列表用 `textContent` 渲染，文件名绝不当 HTML 拼 |
 

@@ -317,15 +317,20 @@
       })
   }
 
-  function deleteRelease(id, version, btn) {
-    var input = prompt(
-      '删除后该版本号作废，不可再上传同版本。\n请输入版本号 ' + version + ' 确认删除：'
+  // 删除：二次确认即可，不再要求手打版本号。
+  // 为什么改：手打版本号只是复制粘贴的负担，拦不住误操作（人会无脑粘），
+  // 真正起作用的是「弹框 + 把后果写全 + 给出可逆的替代方案」。
+  // 文案里必须带上 版本 + 平台 + 架构，让人能一眼核对自己删的是哪一条。
+  function deleteRelease(id, combo, version, btn) {
+    var label = version + (combo ? '（' + combo + '）' : '')
+    var ok = window.confirm(
+      '确定删除 ' + label + ' ？\n\n' +
+        '· 文件立即从磁盘删除，不可恢复\n' +
+        '· 该版本号作废，以后不能再上传同版本号\n' +
+        '· 如果只是想下架，请点「撤回」——撤回可逆，文件也保留'
     )
-    if (input === null) return
-    if (normalize(input) !== version) {
-      alert('版本号不一致，已取消')
-      return
-    }
+    if (!ok) return
+
     btn.disabled = true
     fetch('/api/releases/' + encodeURIComponent(id), { method: 'DELETE' })
       .then(function (r) {
@@ -337,7 +342,7 @@
       })
       .catch(function (err) {
         btn.disabled = false
-        alert(err.message)
+        alert('删除失败：' + err.message)
       })
   }
 
@@ -361,7 +366,14 @@
 
     if (action === 'yank') patchStatus(id, 'yanked', btn)
     else if (action === 'restore') patchStatus(id, 'active', btn)
-    else if (action === 'delete') deleteRelease(id, btn.getAttribute('data-version') || '', btn)
+    else if (action === 'delete') {
+      deleteRelease(
+        id,
+        btn.getAttribute('data-combo') || '',
+        btn.getAttribute('data-version') || '',
+        btn
+      )
+    }
   })
 
   // 筛选器变更即提交
