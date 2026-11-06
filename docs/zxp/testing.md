@@ -1,8 +1,8 @@
 # 成员 B 手工测试手册（PowerShell 版）
 
-> 配套：`docs/zxp/development.md`（实现细节）、`docs/zxp/api.md`（接口契约）
-> 适用分支：`dev-zxp`　目录结构：与方案 4.2 一致（代码在 `src/` 下）
-> **本文所有命令都在 PowerShell 5.1（Windows 自带）里执行**，第 11 节的容器用例除外（那组在 Linux 服务器上跑）
+> 配套：`docs/zxp/development.md`（实现细节）、`docs/zxp/api.md`（接口契约）  
+> 适用分支：`dev-zxp`　目录结构：与方案 4.2 一致（代码在 `src/` 下）  
+> **本文所有命令都在 PowerShell 5.1（Windows 自带）里执行**，第 11 节的容器用例除外（那组在 Linux 服务器上跑）  
 > 用法：从第 0 节开始按顺序做，每条填「结果」列。**P0 不过就别往下走。**
 
 ---
@@ -26,27 +26,37 @@ npm test         # 期望最后一行：全部通过：74 条断言
 
 ### 1.1 PowerShell 三个必知事项
 
-| # | 坑 | 正确写法 |
-|---|---|---|
-| 1 | **`curl` 在 PowerShell 里是 `Invoke-WebRequest` 的别名**，`-F`、`-w` 全都不认 | 一律写 **`curl.exe`** |
-| 2 | PS 5.1 不支持 `&&`、`? :`、`??` | 多条命令用 `;` 分隔或分行写 |
-| 3 | 换行续行符是**反引号** `` ` ``，不是 `\` | 行尾写一个 `` ` `` |
-| 4 | 给原生程序传**带引号的 JSON**，PS 5.1 会把引号吃掉 | body 先写文件，再用 `--data-binary "@文件"`（D-05 有现成写法） |
+| # | 坑                                                                 | 正确写法                                           |
+| - | ----------------------------------------------------------------- | ---------------------------------------------- |
+| 1 | **`curl` 在 PowerShell 里是 `Invoke-WebRequest` 的别名**，`-F`、`-w` 全都不认 | 一律写 **`curl.exe`**                             |
+| 2 | PS 5.1 不支持 `&&`、`? :`、`??`                                        | 多条命令用 `;` 分隔或分行写                               |
+| 3 | 换行续行符是**反引号** `` ` ``，不是 `\`                                      | 行尾写一个 `` ` ``                                  |
+| 4 | 给原生程序传**带引号的 JSON**，PS 5.1 会把引号吃掉                                 | body 先写文件，再用 `--data-binary "@文件"`（D-05 有现成写法） |
 
 本文的两种取数方式分工是固定的：
 
-| 用途 | 用什么 | 原因 |
-|---|---|---|
-| 带 `-F` 上传、看状态码、看原始 body | `curl.exe` | `Invoke-RestMethod` 做 multipart 太麻烦 |
-| GET 取 JSON、PATCH 传 JSON body | `Invoke-RestMethod` | 直接拿到对象，不用手动解析 |
+| 用途                           | 用什么                 | 原因                                  |
+| ---------------------------- | ------------------- | ----------------------------------- |
+| 带 `-F` 上传、看状态码、看原始 body      | `curl.exe`          | `Invoke-RestMethod` 做 multipart 太麻烦 |
+| GET 取 JSON、PATCH 传 JSON body | `Invoke-RestMethod` | 直接拿到对象，不用手动解析                       |
 
-### 1.2 把控制台切到 UTF-8（处理中文时建议）
+### 1.2 中文乱码：只 `chcp` 不够（**必做**）
+
+PS 5.1 有个坑：`chcp 65001` 只改了控制台代码页，**PowerShell 解码原生程序的输出用的是 `[Console]::OutputEncoding`**，两者不是一回事。只 `chcp` 的话，`curl.exe` 返回的中文会被按 GBK 解码，显示成 `娴嬭瘯鍖?exe` ——而服务端存的数据其实是好的。
 
 ```powershell
 chcp 65001
+[Console]::OutputEncoding = [Text.Encoding]::UTF8   # 原生程序输出按 UTF-8 解码
+$OutputEncoding = [Text.Encoding]::UTF8             # 传给原生程序的参数按 UTF-8 编码
 ```
 
-如果后面某个中文文件名报「找不到文件」，先执行这句再试；还不行就用 Windows Terminal + PowerShell 7。
+顺带记住：`Get-Content` 默认按 ANSI 读文件，读 JSON 要显式指定：
+
+```powershell
+Get-Content F:\tmp\oe-test\releases.json -Encoding UTF8
+```
+
+> **判定纪律**：看到乱码先别报 bug。中文文件名/说明的正确性以 `Invoke-RestMethod` 读回的结果为准（它按响应头 `charset=utf-8` 解码，不受控制台影响）。详见 B-12。
 
 ### 1.3 准备隔离的测试数据目录
 
@@ -65,6 +75,8 @@ npm start
 ```
 
 > 这套环境变量只对**当前这个 PowerShell 窗口**有效，另开窗口要重设。想清除：`Remove-Item Env:DATA_DIR`。
+>
+> ⚠️ **A-01 会临时把 `DATA_DIR` 改成 `oe-empty`**，测完必须改回 `oe-test`，否则后面 C/D/E/F 组找文件会全部对不上（数据跑到另一个目录去了）。启动日志里那行 `data=...` 就是用来确认这件事的——**每换一次目录都瞄一眼**。
 
 ### 1.4 生成测试文件
 
@@ -97,24 +109,24 @@ npm run seed
 
 会生成 8 组合 × 2 版本 + 预发布 + 已撤回 + 缺文件 + 墓碑，共 **20 条**记录。
 
-> ⚠️ `seed` 会同时覆盖 `fixtures\releases.sample.json`，跑完 `git status` 会看到它被改动。
+> ⚠️ `seed` 会同时覆盖 `fixtures\releases.sample.json`，跑完 `git status` 会看到它被改动。  
 > 想保留现场先 `git stash`；不想脏就测完按第 14 节还原（**`git checkout --` 会丢掉你自己在这个文件上的改动**，先确认）。
 
 ---
 
 ## 2. 用例总览
 
-| 组 | 覆盖 | 条数 | 优先级 |
-|---|---|---|---|
-| A | 启动 / 健康检查 | 5 | P0 |
-| B | 上传（正常 + 边界 + 并发 + 中断） | 14 | P0 |
-| C | 列表与筛选 | 6 | P0 |
-| D | 撤回 / 恢复 / 删除墓碑 | 8 | P0 |
-| E | 缺文件对账与重传 | 4 | P1 |
-| F | 孤儿文件 | 6 | P1 |
-| G | 来源网段限制 | 4 | P1 |
-| H | 管理页 UI（浏览器） | 12 | P0 |
-| I | 容器与部署（Linux shell） | 8 | P1 |
+| 组 | 覆盖                    | 条数 | 优先级 |
+| - | --------------------- | -- | --- |
+| A | 启动 / 健康检查             | 5  | P0  |
+| B | 上传（正常 + 边界 + 并发 + 中断） | 14 | P0  |
+| C | 列表与筛选                 | 6  | P0  |
+| D | 撤回 / 恢复 / 删除墓碑        | 8  | P0  |
+| E | 缺文件对账与重传              | 4  | P1  |
+| F | 孤儿文件                  | 6  | P1  |
+| G | 来源网段限制                | 4  | P1  |
+| H | 管理页 UI（浏览器）           | 12 | P0  |
+| I | 容器与部署（Linux shell）    | 8  | P1  |
 
 ---
 
@@ -131,12 +143,15 @@ npm start
 ```
 
 **期望**：
+
 - 日志出现 `listening http://0.0.0.0:8080  data=F:\tmp\oe-empty`
 - 自动生成 `releases.json`、`releases\`、`orphan\` 三样东西
 
 ```powershell
-Get-Content F:\tmp\oe-empty\releases.json
+Get-Content F:\tmp\oe-empty\releases.json -Encoding UTF8
 ```
+
+> `-Encoding UTF8` 不能省：去掉它会按 ANSI 读，中文显示成 `鏍稿績鍔涢噺`，看着像文件损坏，其实文件是好的（用 `od -c` 或浏览器打开都能验证）。
 
 内容应为：
 
@@ -148,9 +163,18 @@ Get-Content F:\tmp\oe-empty\releases.json
 }
 ```
 
+**测完必须切回主数据目录**，否则后面所有用例都写进 `oe-empty`：
+
+```powershell
+# Ctrl+C 停服务，然后
+$env:DATA_DIR = "F:\tmp\oe-test"
+Get-ChildItem F:\tmp\oe-test\releases.json    # 确认这个目录里是 seed 数据（20 条）
+npm start
+```
+
 **失败先看**：目录权限；`src/server.js` 的 `initStore()` 把 ENOENT 当成了损坏。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### A-02 healthz 正常 P0
 
@@ -166,30 +190,41 @@ HTTP/1.1 200 OK
 ok
 ```
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### A-03 healthz 是真探针 P1
 
-把数据目录改成不可写，healthz 必须变 503。
+让写盘探针失败，healthz 必须变 503。
 
-Windows 上 `chmod` 不生效，两种做法选一：
+**做法一（推荐，任何文件系统都有效）：把数据目录改名**
+
+`storage.probe()` 是往 `DATA_DIR` 写 `.health.tmp`，目录不在了自然写不进去：
 
 ```powershell
-# 做法一：用 icacls 去掉写权限（当前用户）
-icacls F:\tmp\oe-test /deny "$($env:USERNAME):(W)"
+Rename-Item F:\tmp\oe-test F:\tmp\oe-test-moved
 curl.exe -i http://127.0.0.1:8080/healthz
 # 期望：503 storage unavailable
-# 测完恢复：
+
+Rename-Item F:\tmp\oe-test-moved F:\tmp\oe-test
+curl.exe -i http://127.0.0.1:8080/healthz
+# 期望：恢复 200 ok
+```
+
+这招比改 ACL 好在：不改权限、不用管理员、不依赖盘符格式，改完立刻能恢复。
+
+**做法二（只对 NTFS 有效）：icacls 去写权限**
+
+```powershell
+Get-Volume -DriveLetter F | Select-Object DriveLetter, FileSystem
+# exFAT / FAT32 上 ACL 不生效：icacls 会显示"成功处理"，但写入照样成功，healthz 还是 200
+icacls F:\tmp\oe-test /deny "$($env:USERNAME):(W)"
+curl.exe -i http://127.0.0.1:8080/healthz
 icacls F:\tmp\oe-test /remove:d "$env:USERNAME"
 ```
 
-> `icacls` 参数写法在不同 Windows 语言版本上偶尔会挑刺。报语法错就别纠缠，直接跳到 I-06 用容器的只读挂载验，结论一样且更贴近生产。
+**做法三（最贴近生产）：容器只读挂载，见 I-06**
 
-```bash
-# 做法二：WSL / 容器里 chmod -R a-w（见 I-06，更贴近生产）
-```
-
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### A-04 端口被占 P2
 
@@ -197,7 +232,7 @@ icacls F:\tmp\oe-test /remove:d "$env:USERNAME"
 
 **期望**：第二个进程报 `EADDRINUSE` 并退出，**不能**假装启动成功。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### A-05 重启后数据还在 P0
 
@@ -210,7 +245,7 @@ icacls F:\tmp\oe-test /remove:d "$env:USERNAME"
 
 **期望**：记录还在，`sha256` 与停止前一致。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ---
 
@@ -228,16 +263,16 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=w
 
 **期望**：`201`，body 里：
 
-| 字段 | 期望值 |
-|---|---|
+| 字段                              | 期望值                           |
+| ------------------------------- | ----------------------------- |
 | `version` / `platform` / `arch` | `1.3.0` / `windows10` / `x64` |
-| `sha256` | 64 位小写 hex，与 B-02 一致 |
-| `size` | 16（`hello-exe-1.3.0` 的字节数） |
-| `download_url` | `/dl/1.3.0/windows10-x64` |
-| `status` / `file_missing` | `active` / `false` |
-| `uploaded_ip` | 你自己机器的内网 IP，不是 `172.17.0.1` |
+| `sha256`                        | 64 位小写 hex，与 B-02 一致          |
+| `size`                          | 15（`hello-exe-1.3.0` 共 15 字节，别按 16 判）    |
+| `download_url`                  | `/dl/1.3.0/windows10-x64`     |
+| `status` / `file_missing`       | `active` / `false`            |
+| `uploaded_ip`                   | 本机访问就是 `127.0.0.1`；从另一台机器访问才应是那台的内网 IP；容器里看到 `172.17.0.x` 说明源 IP 被改写   |
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-02 sha256 与本地一致 P0
 
@@ -247,18 +282,24 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=w
 
 与 B-01 响应里的 `sha256` **逐字符对比**。不一致说明传输或哈希实现有问题，后面所有用例都别做了。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-03 磁盘落点正确 P0
 
 ```powershell
-Get-ChildItem -Recurse F:\tmp\oe-test\releases -File | Select-Object FullName, Length
+# 只看这一个文件，别列整个 releases/ —— 有 seed 数据时那儿本来就有一堆包
+$p = "F:\tmp\oe-test\releases\1.3.0\windows10-x64\package.bin"
+Get-Item $p | Select-Object FullName, Length      # 期望 Length = 15
 Get-ChildItem -Recurse F:\tmp\oe-test\releases -Filter *.tmp    # 期望：无输出
 ```
 
-**期望**：只有 `releases\1.3.0\windows10-x64\package.bin`，**没有任何 `.tmp`**。
+**期望**：
+- 该路径存在，`Length` 与 B-01 响应里的 `size` 一致（15）
+- 全库**没有任何 `.tmp`**
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+> 前面跑过 `npm run seed` 的话，`releases\` 下会有 19 个 `package.bin`，那是正常的，不要按「只有一条」判。
+
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-04 元数据在 query，字段顺序无关 P1
 
@@ -277,7 +318,7 @@ curl.exe -X POST "http://127.0.0.1:8080/api/releases?version=1.4.0&platform=linu
   Where-Object version -eq '1.4.0' | Select-Object version, changelog
 ```
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-05 同版本重复上传 409 P0
 
@@ -289,13 +330,16 @@ curl.exe -X POST "http://127.0.0.1:8080/api/releases?version=1.4.0&platform=linu
 { "error": "1.3.0 / windows10 / x64 已存在，请改用新版本号", "existing": { "...": "完整记录" } }
 ```
 
-再确认磁盘文件数没变：
+磁盘上不能多出任何文件——**先记数，再重传，再比对**（不同机器已有条数不同，别按绝对值判）：
 
 ```powershell
-(Get-ChildItem -Recurse F:\tmp\oe-test\releases -File -Filter package.bin).Count
+$before = (Get-ChildItem -Recurse F:\tmp\oe-test\releases -File -Filter package.bin).Count
+# 重新执行上面的重复上传（期望 409）
+$after  = (Get-ChildItem -Recurse F:\tmp\oe-test\releases -File -Filter package.bin).Count
+"before=$before after=$after  没变？$($before -eq $after)"
 ```
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-06 Win7 / Win10 同版本共存 P0
 
@@ -306,7 +350,7 @@ curl.exe -X POST "http://127.0.0.1:8080/api/releases?version=1.3.0&platform=wind
 
 **期望**：`201`。这是常态不是重复——Win7 和 Win10 是两个独立平台。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-07 并发上传同一版本 P0（硬伤）
 
@@ -323,10 +367,10 @@ $jobs | Remove-Job
 "返回码：$($codes -join ',')"
 ```
 
-**期望**：`201,409` 或 `409,201`（顺序不定）。
+**期望**：`201,409` 或 `409,201`（顺序不定）。  
 **绝不能两个都 201**——那说明 `inflight` 占位失效，磁盘上两份内容却只有一条记录。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-08 并发上传 8 个不同平台 P1
 
@@ -354,7 +398,7 @@ $sw.Stop()
 
 **期望**：8 个全是 `201`；总耗时接近**单个包**的时间，不是 8 倍（说明没被串行化）。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-09 非法版本号 400 P0
 
@@ -373,7 +417,7 @@ curl.exe -s -X POST "http://127.0.0.1:8080/api/releases?version=v1.5.0&platform=
 # 期望 version = 1.5.0（没有 v）
 ```
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-10 白名单外的平台组合 400 P0
 
@@ -384,7 +428,7 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.6.0&platform=w
 
 **期望**：`400` + `{"error":"平台与架构组合不受支持：windows10-arm64"}`（文案要带出具体组合）。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-11 没有文件 / 两个文件 P0
 
@@ -403,21 +447,37 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.7.0&platform=l
 
 第二条尤其重要——**不能静默只存第一个**。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-12 中文文件名不乱码 P1
 
 ```powershell
 Copy-Item F:\tmp\pkg\small.bin "F:\tmp\pkg\测试包.exe" -Force
-curl.exe -s -X POST "http://127.0.0.1:8080/api/releases?version=1.8.0&platform=windows10&arch=x64" `
-  -F "file=@F:/tmp/pkg/测试包.exe" | ConvertFrom-Json | Select-Object filename
+
+# 1) 上传（这里用 curl.exe 发，中文路径 PS 5.1 一般能正确处理）
+curl.exe -s -o NUL -w 'upload=%{http_code}' -X POST `
+  "http://127.0.0.1:8080/api/releases?version=1.8.0&platform=windows10&arch=x64" `
+  -F "file=@F:/tmp/pkg/测试包.exe"
+
+# 2) ★ 用 Invoke-RestMethod 读回判定（它按响应头 charset=utf-8 解码，不受控制台影响）
+(Invoke-RestMethod "http://127.0.0.1:8080/api/releases?platform=windows10").releases |
+  Where-Object version -eq '1.8.0' | Select-Object filename
+
+# 3) 双保险：直接看磁盘上的 JSON（必须加 -Encoding UTF8）
+Select-String -Path F:\tmp\oe-test\releases.json -Pattern '1\.8\.0' -Context 0,6 |
+  Out-String -Width 200
 ```
 
-**期望**：`filename` = `测试包.exe`，不是 `æµ‹è¯•åŒ….exe` 这种乱码。
+**期望**：`filename` = `测试包.exe`。
 
-> 如果 `curl.exe` 报「找不到文件」，先在本窗口执行 `chcp 65001` 再重试；还不行就到浏览器里用上传区传一次（H-02 的中文文件名项），浏览器天然 UTF-8。
+**关键**：判定必须走 `Invoke-RestMethod` 或 `Get-Content -Encoding UTF8`。
+如果用 `curl.exe ... | ConvertFrom-Json` 看到 `娴嬭瘯鍖?exe` / `æµ‹è¯•åŒ….exe`，**那是 PowerShell 解码显示的问题，不是服务端的 bug**——
+判别方法：直接读 `releases.json`（加 `-Encoding UTF8`），里面的 `filename` 是对的，就说明只是显示问题。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+> 两种情况下这条会「失败」但服务端没问题：① 没做 §1.2 的 `[Console]::OutputEncoding` 设置；② 用 `curl.exe | ConvertFrom-Json` 判定。
+> 真正要报 bug 的判据是：`Invoke-RestMethod` 读回也是乱码，或磁盘 JSON 里就是乱码。
+
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-13 超过 MAX_UPLOAD_MB → 413 P1
 
@@ -436,15 +496,20 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=1.9.0&platform=l
 ```
 
 **期望**：
+
 - `413` + `{"error":"文件超过单包上限 1MB"}`
 - 目录里**不留 `.tmp`**：`Get-ChildItem -Recurse F:\tmp\oe-test\releases -Filter *.tmp` 无输出
 - 紧接着 `curl.exe -i http://127.0.0.1:8080/healthz` 仍 `200`（进程没被打死）
 
 测完 `Remove-Item Env:MAX_UPLOAD_MB` 并重启。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### B-14 上传中途断开，服务不退出 P0（硬伤）
+
+> ⚠️ **前置检查**：如果你刚改过 `MAX_UPLOAD_MB=1`，必须先 `Remove-Item Env:MAX_UPLOAD_MB` 并**重启服务**。
+> 否则 400MB 会在几秒内直接 413，根本没有「中途断开」这回事，测了等于没测。
+> 重启后先 `curl.exe -s -o NUL -w '%{http_code}' .../healthz` 确认服务在，再看日志首行 `data=` 是不是 `oe-test`。
 
 ```powershell
 # 后台起一个限速上传（400MB 约需 7 分钟，留足打断时间）
@@ -462,14 +527,24 @@ curl.exe -s -o NUL -w 'healthz=%{http_code}' http://127.0.0.1:8080/healthz
 Get-ChildItem -Recurse F:\tmp\oe-test\releases -Filter *.tmp -ErrorAction SilentlyContinue
 ```
 
+**怎么确认这次真的传起来过**（不然可能又是 413 秒退）：
+
+```powershell
+# 打断之后，9.9.9 目录不该有完整的 package.bin，也不该留 .tmp
+Get-ChildItem -Recurse F:\tmp\oe-test\releases\9.9.9 -ErrorAction SilentlyContinue
+(Invoke-RestMethod http://127.0.0.1:8080/api/releases).releases.version   # 期望不含 9.9.9
+```
+
 **期望**：
+
 - `healthz=200`
 - 服务端日志**没有** `UnhandledPromiseRejection` / `uncaughtException`
 - `.tmp` 已被清掉（可能延迟 1–2 秒等 pipeline 收尾）
+- 列表里没有 `9.9.9`（半截包不会变成一条记录）
 
 **连做 3 次**，进程必须还活着。这条不过就别上线。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ---
 
@@ -484,11 +559,12 @@ $r.releases | Select-Object version, platform, arch, status, downloads
 ```
 
 **期望**：
+
 - 按版本号**降序**（不是插入顺序）
 - 每项都有 `downloads`（数字）
 - **不含** `status=deleted` 的记录
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### C-02 六种筛选逐个过 P0
 
@@ -501,16 +577,16 @@ foreach ($s in 'all','stable','prerelease','yanked','missing','deleted') {
 
 **期望**（seed 数据下）：
 
-| status | 期望 |
-|---|---|
-| `all` | 不含墓碑（`deleted`） |
-| `stable` | 只有 `active` 且非预发布 |
-| `prerelease` | 只有预发布（1 条） |
-| `yanked` | 只有 `yanked` |
-| `missing` | 只有 `file_missing=true`（1 条） |
-| `deleted` | 只有墓碑（1 条） |
+| status       | 期望                          |
+| ------------ | --------------------------- |
+| `all`        | 不含墓碑（`deleted`）             |
+| `stable`     | 只有 `active` 且非预发布           |
+| `prerelease` | 只有预发布（1 条）                  |
+| `yanked`     | 只有 `yanked`                 |
+| `missing`    | 只有 `file_missing=true`（1 条） |
+| `deleted`    | 只有墓碑（1 条）                   |
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### C-03 平台筛选 P1
 
@@ -521,7 +597,7 @@ foreach ($s in 'all','stable','prerelease','yanked','missing','deleted') {
 
 **期望**：只返回 `platform=windows7` 的记录。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### C-04 非法 status 必须 400 P0
 
@@ -533,7 +609,7 @@ curl.exe -i "http://127.0.0.1:8080/api/releases?status=whatever"
 
 **关键**：这条以前是「返回全部含墓碑」。若这里返回 200 且能看到 `deleted` 记录，就是老 bug 复发。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### C-05 下载计数 P1
 
@@ -550,7 +626,7 @@ Start-Sleep -Seconds 31
 
 **期望**：对应那条 `downloads` +1。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### C-06 排序稳定性 P2
 
@@ -564,7 +640,7 @@ if (Compare-Object $a $b -SyncWindow 0) { "顺序不一致" } else { "顺序一�
 
 **期望**：`顺序一致`（同版本按 `uploaded_at` 降序兜底）。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ---
 
@@ -594,7 +670,7 @@ Test-Path "F:\tmp\oe-test\releases\$($r.version)\$($r.platform)-$($r.arch)\packa
 # 期望 True
 ```
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-02 撤回（冻结表 POST 别名）P0
 
@@ -605,7 +681,7 @@ curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/yank" | ConvertFrom-
 
 **期望**：`status = yanked`，与 D-01 结果一致（两条路由是同一份实现）。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-03 撤回幂等 P1
 
@@ -613,7 +689,7 @@ curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/yank" | ConvertFrom-
 
 **期望**：仍 `200`、`status` 还是 `yanked`，不报错、不写坏 JSON。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-04 恢复 P0
 
@@ -624,11 +700,11 @@ curl.exe -s -X POST "http://127.0.0.1:8080/api/releases/$id/unyank" | ConvertFro
 
 **期望**：`status = active`。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-05 PATCH 参数校验 P1
 
-> PS 5.1 有个坑：给原生程序传带引号的 JSON，引号会被吃掉（`'{"a":"b"}'` 到 curl 那儿变成 `{a:b}`）。
+> PS 5.1 有个坑：给原生程序传带引号的 JSON，引号会被吃掉（`'{"a":"b"}'` 到 curl 那儿变成 `{a:b}`）。  
 > 所以下面**把 body 先写成文件**，再用 `--data-binary @文件` 发，绕开参数解析。
 
 ```powershell
@@ -642,10 +718,10 @@ curl.exe -i -X PATCH "http://127.0.0.1:8080/api/releases/not-exist" `
 # 期望 404「版本记录不存在」
 ```
 
-**期望**：`400` 与 `404` 各一条，body 是 `{"error":"…"}`。
+**期望**：`400` 与 `404` 各一条，body 是 `{"error":"…"}`。  
 如果 404 那条变成了 400，说明 JSON 没发对（引号被吃了），按上面的写法重来。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-06 删除是墓碑 P0
 
@@ -662,12 +738,13 @@ $d = Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/releases/$id" -Method Del
 ```
 
 **期望**：
+
 - `status=deleted`，`file_missing=False`（**不是 True**）
 - `文件还在吗：False`（磁盘已删）
 - 最后一行 `True`（墓碑记录还在，`status=deleted` 查得到）
 - 默认列表（`all`）里**看不到**它
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-07 重复删除 409 P1
 
@@ -677,7 +754,7 @@ curl.exe -i -X DELETE "http://127.0.0.1:8080/api/releases/$id"
 
 **期望**：`409`「该版本已删除」。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### D-08 删除后同版本重传 409 P0（硬伤）
 
@@ -692,7 +769,7 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases?version=$($rel.version)&
 
 这条是墓碑机制存在的唯一理由：**删除后版本号永久作废**。否则「删了再传」等于给同一个 URL 换内容，`immutable` 缓存和版本追溯同时失效。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ---
 
@@ -717,11 +794,12 @@ Remove-Item $ePath -Force
 ```
 
 **期望**：
+
 - 这条出现在 `missing` 列表里
 - `file_missing = True`
 - **`status` 仍是 `active`**（对账只动文件事实，不动发版人意图）
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### E-02 缺文件记录允许同版本重传 P0
 
@@ -734,7 +812,7 @@ $fix = curl.exe -s -X POST "http://127.0.0.1:8080/api/releases?version=$($e.vers
 
 **期望**：`201`（**不是 409**）；`id` **与原来完全一样**（`stats.json` 的 key 不能换，否则下载计数归零）；`file_missing=False`；`size=5242880`。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### E-03 已撤回 + 缺文件：恢复必须 409 P1
 
@@ -753,7 +831,7 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases/$($e.id)/unyank"
 
 **期望**：`409`「文件缺失，请先重新上传后再恢复」；记录仍是 `yanked` + `file_missing=True`（**不能变回 active**）。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### E-04 墓碑不参与对账 P1
 
@@ -768,7 +846,7 @@ curl.exe -i -X POST "http://127.0.0.1:8080/api/releases/$($e.id)/unyank"
 
 若变成 `True`，说明对账没跳过墓碑，查重会放行，**不可变保护被击穿**。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ---
 
@@ -787,7 +865,7 @@ Test-Path F:\tmp\oe-test\releases\7.7.7\linux-x64\package.bin    # 期望 False
 
 **期望**：文件被**移动**（不是删除）到 `orphan\`，名字形如 `7.7.7__linux-x64__package.bin.1762300000000`。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### F-02 接口能列出孤儿 P0
 
@@ -799,7 +877,7 @@ $o.orphans | Select-Object path, size, mtime
 
 **期望**：`count` 与实际文件数一致；`path` 用**正斜杠**、不带 `orphan/` 前缀。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### F-03 删单个 P0
 
@@ -812,7 +890,7 @@ curl.exe -s -X DELETE "http://127.0.0.1:8080/api/orphans?path=$target"
 
 **期望**：返回 `{"removed":1,"bytes":…,"path":"…"}`；再查 `count` 少一个。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### F-04 路径穿越必须 400 P0（安全）
 
@@ -824,7 +902,7 @@ Test-Path F:\tmp\oe-test\releases.json    # 期望 True：文件还在
 
 **期望**：两条都 `400` + `{"error":"path 非法：必须位于 data/orphan/ 之内"}`。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### F-05 删除不存在 / 空 path P1
 
@@ -835,7 +913,7 @@ curl.exe -i -X DELETE "http://127.0.0.1:8080/api/orphans?path="           # 400
 
 **期望**：`404`「该孤儿文件不存在（可能已被删除）」；`400`「path 不能为空」。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ### F-06 清空 P0
 
@@ -848,7 +926,7 @@ Test-Path F:\tmp\oe-test\orphan                                 # 期望 True（
 
 **期望**：返回 `{"removed":N,"bytes":X}`；`count=0`；`orphan\` 目录**仍存在**，不影响下次对账。
 
-**结果**：☐ 通过　☐ 失败　备注：__________
+**结果**：☐ 通过　☐ 失败　备注：\__________
 
 ---
 
@@ -879,6 +957,7 @@ curl.exe -i http://127.0.0.1:8081/api/releases
 ```
 
 > 必须是 JSON。以前是纯文本，CI 里 `JSON.parse` 会抛错，排查方向被带偏成「服务挂了」。
+
 
 **结果**：☐ 通过　☐ 失败　备注：__________
 
@@ -1234,6 +1313,9 @@ docker exec -it online-exe node -e "require('http').createServer((q,s)=>{console
 
 | 症状 | 先查什么 | 常见原因 |
 |---|---|---|
+| 中文全变成 `鏍稿績鍔涢噺` / `娴嬭瘯鍖?` | 有没有设 `[Console]::OutputEncoding`；`Get-Content` 加没加 `-Encoding UTF8` | PS 5.1 的解码问题，**数据本身没坏**（见 §1.2 / B-12） |
+| `icacls` 显示"成功处理"但 healthz 仍 200 | `Get-Volume -DriveLetter F \| Select FileSystem` | exFAT/FAT32 上 ACL 不生效，改用 A-03 做法一（改名） |
+| 后面用例的文件路径全对不上 | 启动日志那行 `data=` | A-01 用完没把 `DATA_DIR` 切回 `oe-test` |
 | `curl` 报「参数无法识别」 | 是不是写了 `curl` | PowerShell 里必须 `curl.exe` |
 | 启动崩，`ERR_MODULE_NOT_FOUND` | 是不是手敲了 `node server.js` | 用 `npm start`（内部是 `node src/server.js`） |
 | 启动崩，`Cannot find package 'express'` | `node_modules` 在不在 | 先 `npm ci` |

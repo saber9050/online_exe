@@ -71,8 +71,11 @@ Docker `HEALTHCHECK` 与运维巡检用。**不是** `res.send('ok')` 那种假�
 | 项 | 值 |
 |---|---|
 | 鉴权 | 无（不受 `ADMIN_ALLOW_CIDR` 限制） |
-| 成功 | `200` + `text/plain`: `ok` |
-| 失败 | `503` + `text/plain`: `storage unavailable` |
+| 成功 | `200`，body 就是 `ok` |
+| 失败 | `503`，body 是 `storage unavailable` |
+
+> `Content-Type` 是 `text/html; charset=utf-8`（Express `res.send('字符串')` 的默认行为），不是 `text/plain`。
+> 判健康只看**状态码**，别按 content-type 判。
 
 ```powershell
 curl.exe -i http://127.0.0.1:8080/healthz
