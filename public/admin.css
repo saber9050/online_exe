@@ -136,6 +136,10 @@ main.wrap { padding-top: 24px; }
 .ops .btn { margin-right: 6px; }
 .row-missing td { background: #fffafa; }
 .row-flash td { background: #fff8e1; transition: background 1s; }
+/* 刚被撤回/恢复、但已不符合当前筛选的行：淡化保留，刷新后才消失。
+   直接删行会让用户「点完就看不见结果」，以为操作把记录弄丢了 */
+.row-stale { opacity: 0.55; }
+.row-stale td { background: #fafbfc; }
 
 .suggestion { padding: 10px 0; border-bottom: 1px dashed #eef1f6; }
 .suggestion:last-child { border-bottom: 0; }

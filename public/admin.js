@@ -10,6 +10,40 @@
 
   function $(id) { return document.getElementById(id) }
 
+  // ── 页面位置保持 ──────────────────────────────────────────────
+  // 筛选切换是真正的页面导航，只能用「提交前记位置、加载后还原」。
+  // 撤回/恢复/删除已经改成局部更新（见 applyStatus / removeRow），不再触发导航。
+  var SCROLL_KEY = 'online-exe-scroll'
+
+  // 关掉浏览器自带的滚动恢复，否则它会和下面的还原抢，位置会先跳一下再回来
+  try {
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
+  } catch (e) { /* 老浏览器忽略 */ }
+
+  function rememberScroll() {
+    try {
+      sessionStorage.setItem(
+        SCROLL_KEY,
+        String(window.pageYOffset || document.documentElement.scrollTop || 0)
+      )
+    } catch (e) { /* 隐私模式忽略 */ }
+  }
+
+  function restoreScroll() {
+    var y = 0
+    try {
+      y = Number(sessionStorage.getItem(SCROLL_KEY) || 0)
+      sessionStorage.removeItem(SCROLL_KEY)
+    } catch (e) {
+      return
+    }
+    if (!y) return
+    // 等一帧再滚：表格高度受字体渲染影响，太早 scrollTo 会被后面涨上来的内容顶偏
+    requestAnimationFrame(function () {
+      window.scrollTo(0, Math.min(y, document.body.scrollHeight))
+    })
+  }
+
   var form = $('upload-form')
   if (!form) return
 
@@ -297,7 +331,90 @@
     return null
   }
 
+  // ── 状态徽章 / 行内更新 ───────────────────────────────────────────
+  // 撤回、恢复、删除都不再整页刷新，只改这一行。
+  // 原因有两个：① 刷新会把滚动位置打回顶部，列表长时每操作一次就得重新往下找；
+  //           ② 刷新后按当前筛选重新过滤，撤回的行在「正式」筛选下会直接消失，
+  //              用户会以为记录被删了 —— 其实只是筛掉了。
+
+  /** 状态徽章：规则必须和 views/admin.ejs 的 <td class="cell-status"> 那段一致 */
+  function badgeHtml(status, missing) {
+    var out = ''
+    if (status === 'deleted') out += '<span class="badge">已删除</span>'
+    if (status === 'yanked') out += '<span class="badge">已撤回</span>'
+    if (status === 'active') out += '<span class="badge badge-ok">在架</span>'
+    if (missing) out += '<span class="badge badge-danger">缺文件</span>'
+    return out
+  }
+
+  function flashRow(tr) {
+    tr.classList.add('row-flash')
+    setTimeout(function () { tr.classList.remove('row-flash') }, 3000)
+  }
+
+  /**
+   * 就地切换一行的状态。
+   * 操作列只改「撤回 ↔ 恢复」那一颗按钮：两个动作落在同一个按钮上，
+   * 这样不必把模板里的按钮矩阵在 JS 里重写一遍，少一处会漂移的实现。
+   */
+  function applyStatus(tr, status) {
+    tr.setAttribute('data-status', status)
+    var missing = tr.getAttribute('data-missing') === '1'
+
+    var cell = tr.querySelector('.cell-status')
+    if (cell) cell.innerHTML = badgeHtml(status, missing)
+
+    var ops = tr.querySelector('.ops')
+    var btn = ops && ops.querySelector('[data-action="yank"], [data-action="restore"]')
+    if (!btn) return
+
+    if (status === 'yanked') {
+      btn.setAttribute('data-action', missing ? '' : 'restore')
+      btn.textContent = '恢复'
+      btn.disabled = missing
+      if (missing) btn.title = '文件缺失：请先重新上传，再恢复'
+      else btn.removeAttribute('title')
+    } else {
+      btn.setAttribute('data-action', 'yank')
+      btn.textContent = '撤回'
+      btn.disabled = false
+      btn.removeAttribute('title')
+    }
+  }
+
+  /** 当前筛选下这一行还该不该出现（只用来提示，不真的删行） */
+  function matchesFilter(tr, status) {
+    var sel = document.querySelector('#filter-form select[name="status"]')
+    var f = sel ? sel.value : 'all'
+    var isBeta = (tr.querySelector('.tag') || {}).textContent === 'Beta'
+    var missing = tr.getAttribute('data-missing') === '1'
+
+    if (f === 'all') return status !== 'deleted'
+    if (f === 'stable') return status === 'active' && !isBeta
+    if (f === 'prerelease') return status === 'active' && isBeta
+    if (f === 'yanked') return status === 'yanked'
+    if (f === 'missing') return missing && status !== 'deleted'
+    if (f === 'deleted') return status === 'deleted'
+    return true
+  }
+
+  /**
+   * 改完状态后，若已不符合当前筛选，把行淡化并说明原因。
+   * 为什么不直接删掉：用户刚点的就是这一行，立刻消失等于「操作完看不见结果」。
+   * 留到下次刷新再消失，既给了反馈，又不破坏筛选语义。
+   */
+  function refreshStale(tr, status) {
+    if (matchesFilter(tr, status)) {
+      tr.classList.remove('row-stale')
+      tr.removeAttribute('title')
+      return
+    }
+    tr.classList.add('row-stale')
+    tr.title = '已' + (status === 'yanked' ? '撤回' : '恢复') + '，不在当前筛选内，刷新后不再显示'
+  }
+
   function patchStatus(id, status, btn) {
+    var tr = btn.closest('tr')
     btn.disabled = true
     fetch('/api/releases/' + encodeURIComponent(id), {
       method: 'PATCH',
@@ -309,12 +426,57 @@
       })
       .then(function (res) {
         if (!res.ok) throw new Error(res.data.error || '操作失败')
-        location.reload()
+        if (!tr) {
+          // 找不到行（理论上不会）才退回整页刷新，保证状态一定同步
+          btn.disabled = false
+          location.reload()
+          return
+        }
+        try {
+          applyStatus(tr, res.data.status)
+          refreshStale(tr, res.data.status)
+          flashRow(tr)
+        } catch (e) {
+          // 行内更新失败（DOM 结构与预期不符）时退回刷新：
+          // 宁可跳一下，也不能让用户以为操作没生效
+          location.reload()
+        }
       })
       .catch(function (err) {
         btn.disabled = false
         alert(err.message)
       })
+  }
+
+  /**
+   * 删除成功后只把这一行从 DOM 摘掉，同时把状态条的两个数字减掉，
+   * 口径与后端 /admin 的 summary 一致：墓碑不计入版本总数，也不计入占用。
+   */
+  function removeRow(tr, btn) {
+    var size = Number(tr.getAttribute('data-size') || 0)
+    var missing = tr.getAttribute('data-missing') === '1'
+    var wrap = tr.closest('.table-wrap')
+    var tbody = tr.parentNode
+
+    tr.parentNode.removeChild(tr)
+
+    var vEl = $('stat-versions')
+    if (vEl) vEl.textContent = String(Math.max(0, Number(vEl.textContent || 0) - 1))
+
+    if (!missing) {
+      var oEl = $('stat-occupied')
+      if (oEl) {
+        var left = Math.max(0, Number(oEl.getAttribute('data-bytes') || 0) - size)
+        oEl.setAttribute('data-bytes', String(left))
+        oEl.textContent = fmtBytes(left)
+      }
+    }
+
+    // 删空了给个占位，否则只剩表头，看着像页面坏了
+    if (wrap && tbody && !tbody.querySelector('tr[data-id]')) {
+      wrap.outerHTML = '<p class="empty">当前筛选下没有版本。</p>'
+    }
+    if (btn) btn.disabled = false
   }
 
   // 删除：二次确认即可，不再要求手打版本号。
@@ -331,6 +493,7 @@
     )
     if (!ok) return
 
+    var tr = btn.closest('tr')
     btn.disabled = true
     fetch('/api/releases/' + encodeURIComponent(id), { method: 'DELETE' })
       .then(function (r) {
@@ -338,7 +501,8 @@
       })
       .then(function (res) {
         if (!res.ok) throw new Error(res.data.error || '删除失败')
-        location.reload()
+        if (tr) removeRow(tr, btn)
+        else location.reload()
       })
       .catch(function (err) {
         btn.disabled = false
@@ -376,11 +540,16 @@
     }
   })
 
-  // 筛选器变更即提交
+  // 筛选器变更即提交。提交是一次真正的页面导航，先把当前位置记下来，
+  // 加载后由 restoreScroll() 还原 —— 否则每换一个筛选就被拽回页面顶部。
   var filterForm = $('filter-form')
   if (filterForm) {
+    filterForm.addEventListener('submit', rememberScroll)
     Array.prototype.forEach.call(filterForm.querySelectorAll('select'), function (s) {
-      s.addEventListener('change', function () { filterForm.submit() })
+      s.addEventListener('change', function () {
+        rememberScroll()
+        filterForm.submit()
+      })
     })
   }
 
@@ -398,6 +567,9 @@
       setTimeout(function () { tr.classList.remove('row-flash') }, 3000)
     }
   }
+
+  // 还原筛选切换前的滚动位置（没有记录就什么都不做，保持原来的置顶行为）
+  restoreScroll()
 
   // ── 孤儿文件：懒加载 / 单个删除 / 全部清理 ─────────────────────────────
   // 孤儿 = 磁盘上有、版本记录里没有的文件（启动对账把它们移入 data/orphan/ 待确认）。

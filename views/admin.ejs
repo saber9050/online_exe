@@ -9,8 +9,8 @@
       <b><%= fmtSize(summary.free) %></b>
       <span class="dim">/ 共 <%= fmtSize(summary.total) %></span>
     </div>
-    <div class="stat"><span class="stat-label">版本总数</span><b><%= summary.totalVersions %></b></div>
-    <div class="stat"><span class="stat-label">占用合计</span><b><%= fmtSize(summary.occupied) %></b></div>
+    <div class="stat"><span class="stat-label">版本总数</span><b id="stat-versions"><%= summary.totalVersions %></b></div>
+    <div class="stat"><span class="stat-label">占用合计</span><b id="stat-occupied" data-bytes="<%= summary.occupied %>"><%= fmtSize(summary.occupied) %></b></div>
     <div class="stat">
       <span class="stat-label">孤儿文件</span>
       <b id="orphan-count"><%= summary.orphan.count %> 个</b>
@@ -110,7 +110,15 @@
         </thead>
         <tbody>
           <% rows.forEach(function(r){ %>
-          <tr data-id="<%= r.id %>" class="<%= r.file_missing ? 'row-missing' : '' %>">
+          <%# data-* 是给前端做「局部更新」用的：撤回/恢复/删除不再整页刷新，
+              只改这一行，所以需要 status / size / 版本 / 组合这些原始值 %>
+          <tr data-id="<%= r.id %>"
+              data-status="<%= r.status %>"
+              data-missing="<%= r.file_missing ? '1' : '0' %>"
+              data-size="<%= r.size %>"
+              data-version="<%= r.version %>"
+              data-combo="<%= r.comboLabel %>"
+              class="<%= r.file_missing ? 'row-missing' : '' %>">
             <td><b><%= r.version %></b> <span class="tag"><%= r.is_prerelease ? 'Beta' : '正式' %></span></td>
             <td><%= r.platformLabel %></td>
             <td><%= r.arch %></td>
@@ -119,7 +127,7 @@
               <%= fmtDate(r.uploaded_at) %>
               <div class="dim small"><%= r.uploaded_ip || '' %></div>
             </td>
-            <td>
+            <td class="cell-status">
               <% if (r.status === 'deleted') { %><span class="badge">已删除</span><% } %>
               <% if (r.status === 'yanked') { %><span class="badge">已撤回</span><% } %>
               <% if (r.status === 'active') { %><span class="badge badge-ok">在架</span><% } %>
