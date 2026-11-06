@@ -48,6 +48,10 @@
     var subEl = document.getElementById(subId);
     if (subEl) subEl.className += ' ua-sub';
 
+    // 地址栏带锚点（如分类标签的 #history、导航的 #os-macos）时交给浏览器定位，
+    // 否则自动滚动会把用户刚点的位置抢走。
+    if (window.location.hash && window.location.hash.length > 1) return;
+
     // 等布局完成再滚动，避免图片 / 字体撑开高度后位置偏移
     setTimeout(function () {
       scrollToId(famId);

@@ -90,14 +90,20 @@
   </section>
   <% }) %>
 
-  <section class="history">
+  <section class="history" id="history">
     <div class="history-head">
       <h2>版本历史</h2>
-      <span class="dim">最近 20 条 · 共 <%= totalCount %> 条</span>
+      <span class="dim"><%= historyTotal > 20 ? '最近 20 条 · 共 ' + historyTotal + ' 条' : '共 ' + historyTotal + ' 条' %></span>
+    </div>
+
+    <div class="tabs">
+      <% historyTabs.forEach(function(t){ %>
+        <a class="tab<%= t.active ? ' is-active' : '' %>" href="<%= t.href %>"><%= t.label %><span class="tab-count"><%= t.count %></span></a>
+      <% }) %>
     </div>
 
     <% if (history.length === 0) { %>
-      <p class="empty">还没有发布任何版本。</p>
+      <p class="empty"><%= activeOs === 'all' ? '还没有发布任何版本。' : '该分类下还没有发布版本。' %></p>
     <% } else { %>
     <div class="table-wrap">
       <table class="table">
@@ -113,19 +119,12 @@
               <b><%= r.version %></b>
               <% if (r.is_prerelease) { %><span class="badge badge-beta">Beta</span><% } %>
               <% if (r.status === 'yanked') { %><span class="badge">已撤回</span><% } %>
-              <% if (r.file_missing) { %><span class="badge badge-danger">缺文件</span><% } %>
             </td>
             <td><%= r.platformLabel %><span class="dim"> · <%= r.archLabel %></span></td>
             <td><%= fmtSize(r.size) %></td>
             <td><%= fmtDate(r.uploaded_at) %></td>
             <td class="changelog"><%= r.changelog || '—' %></td>
-            <td>
-              <% if (r.file_missing) { %>
-                <span class="dim">不可用</span>
-              <% } else { %>
-                <a class="link" href="<%= r.download_url %>">下载</a>
-              <% } %>
-            </td>
+            <td><a class="link" href="<%= r.download_url %>">下载</a></td>
           </tr>
           <% }) %>
         </tbody>

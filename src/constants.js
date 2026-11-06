@@ -66,6 +66,17 @@ export const OS_FAMILIES = [
   { id: 'linux', label: 'Linux', anchor: 'linux', platforms: ['linux'] },
 ]
 
+/** 平台 id → 所属 OS 大类 id */
+const PLATFORM_FAMILY = new Map()
+for (const f of OS_FAMILIES) {
+  for (const p of f.platforms) PLATFORM_FAMILY.set(p, f.id)
+}
+
+/** @param {string} platform 返回 'windows' | 'macos' | 'linux'，未知平台返回 '' */
+export function osFamilyOf(platform) {
+  return PLATFORM_FAMILY.get(platform) || ''
+}
+
 /** 8 组合白名单：`platform-arch` */
 export const PLATFORM_ARCH_SET = new Set(
   PLATFORM_GROUPS.flatMap((g) => g.arches.map((a) => `${g.id}-${a.id}`)),
