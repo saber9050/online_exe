@@ -5,13 +5,21 @@
 (function () {
   'use strict';
 
+  // 子组 id → 所属大类 id。Windows 的 Win7 / Win10 都归属同一个大类区块。
+  var FAMILY_OF = {
+    'sub-win7': 'os-windows',
+    'sub-win10': 'os-windows',
+    'sub-macos': 'os-macos',
+    'sub-linux': 'os-linux'
+  };
+
   function detectPlatform() {
     var ua = navigator.userAgent || '';
     // Win11 也报 Windows NT 10.0，无需区分
-    if (/Windows NT 6\.1/.test(ua)) return 'win7';
-    if (/Windows NT 10\.0/.test(ua)) return 'win10';
-    if (/Mac OS X/.test(ua)) return 'macos';
-    if (/Linux/.test(ua) && !/Android/.test(ua)) return 'linux';
+    if (/Windows NT 6\.1/.test(ua)) return 'sub-win7';
+    if (/Windows NT 10\.0/.test(ua)) return 'sub-win10';
+    if (/Mac OS X/.test(ua)) return 'sub-macos';
+    if (/Linux/.test(ua) && !/Android/.test(ua)) return 'sub-linux';
     return '';
   }
 
@@ -28,17 +36,21 @@
   }
 
   function init() {
-    var id = detectPlatform();
-    if (!id) return;
+    var subId = detectPlatform();
+    if (!subId) return;
 
-    var el = document.getElementById(id);
-    if (!el) return;
+    var famId = FAMILY_OF[subId];
+    var famEl = famId ? document.getElementById(famId) : null;
+    if (!famEl) return;
 
-    el.className += ' ua-target';
+    famEl.className += ' ua-target';
+
+    var subEl = document.getElementById(subId);
+    if (subEl) subEl.className += ' ua-sub';
 
     // 等布局完成再滚动，避免图片 / 字体撑开高度后位置偏移
     setTimeout(function () {
-      scrollToId(id);
+      scrollToId(famId);
     }, 60);
   }
 
