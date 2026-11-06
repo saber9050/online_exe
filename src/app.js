@@ -3,7 +3,7 @@ import { cfg } from './config.js'
 import { router } from './routes/index.js'
 import { adminGuard } from './middleware/cidr.js'
 import { notFound, errorHandler } from './middleware/errors.js'
-import { fmtSize, fmtDate } from './lib/format.js'
+import { fmtSize, fmtDate } from './format.js'
 
 export function createApp() {
   const app = express()

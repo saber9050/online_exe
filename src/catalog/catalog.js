@@ -1,4 +1,5 @@
 // 内存版本索引。唯一键 (platform, arch, version)，不含渠道。
+// 记录结构见 ./types.js。
 import { compareVersion, normalizeVersion } from '../semver.js'
 
 function makeKey(platform, arch, version) {
@@ -6,9 +7,9 @@ function makeKey(platform, arch, version) {
 }
 
 export function createCatalog() {
-  /** @type {any[]} */
+  /** @type {import('./types.js').Release[]} */
   let list = []
-  /** @type {Map<string, any>} */
+  /** @type {Map<string, import('./types.js').Release>} */
   const byKey = new Map()
 
   function rebuild() {

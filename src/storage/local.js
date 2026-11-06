@@ -1,9 +1,10 @@
 // 本地磁盘存储实现。object_key 由程序生成，绝不使用用户文件名。
+// 对外只通过 ./storage.js 暴露，路由层不直接 import 本文件。
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { cfg } from '../config.js'
 
-export const storage = {
+export const localStorage = {
   /** @param {string} objectKey */
   abs(objectKey) {
     return path.join(cfg.releasesDir, objectKey)

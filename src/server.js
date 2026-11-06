@@ -1,11 +1,20 @@
-// 入口：启动自检 → HTTP Server（四个超时）→ 优雅退出。
+// 入口：启动自检（目录 → 装载 JSON → 清理 tmp → 对账 → 计数装载）→ HTTP Server（四个超时）→ 优雅退出。
 import http from 'node:http'
 import { createApp } from './app.js'
 import { cfg } from './config.js'
-import { initStore } from './lib/store.js'
-import { stats } from './lib/stats.js'
-import { flush } from './lib/persist.js'
+import { catalog } from './catalog/catalog.js'
+import { stats } from './catalog/stats.js'
+import { ensureDirs, loadReleases, cleanupTmp, reconcile, flush } from './catalog/persist.js'
 import { inflight } from './routes/upload.js'
+
+async function initStore() {
+  await ensureDirs()
+  const data = await loadReleases()
+  catalog.load(data.releases)
+  await cleanupTmp()
+  await reconcile(catalog)
+  await stats.load()
+}
 
 async function main() {
   await initStore()

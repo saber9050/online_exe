@@ -2,7 +2,7 @@
 // 纪律：这个文件只由成员 A 改（方案 7.8），B 新增接口时提供 handler，由 A 挂路由。
 // 本次 B 侧补齐 yank/unyank 别名时在这里新增了两行，已同步告知 A。
 import { Router } from 'express'
-import { storage } from '../lib/storage.js'
+import { storage } from '../storage/storage.js'
 import { renderDownload } from './pages/download.js'
 import { renderAdmin } from './pages/admin.js'
 import { uploadHandler } from './upload.js'

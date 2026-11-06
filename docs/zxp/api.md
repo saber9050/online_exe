@@ -1,7 +1,7 @@
 # API 文档（成员 B：管理接口 + 健康检查）
 
 > 对应方案：`docs/release-platform-design.md`（v3.4）
-> 归属：**B** — `routes/upload.js`、`routes/releases.js`、`routes/dto.js`、`middleware/errors.js`
+> 归属：**B** — `src/routes/upload.js`、`src/routes/releases.js`、`src/routes/dto.js`、`src/middleware/errors.js`
 > 开发细节见 [`development.md`](./development.md)；下载接口 `/dl/*` 与下载页由 A 维护，不在本文范围
 
 ---
@@ -407,7 +407,7 @@ curl -X DELETE http://127.0.0.1:8080/api/orphans
 
 ## 9. Release DTO 字段表
 
-`routes/dto.js` 是**唯一**的响应形状来源。磁盘结构（`releases.json`）与它刻意分开：API 想加 `download_url` 不会污染磁盘文件，想藏 `uploaded_ip` 也不会少历史字段。
+`src/routes/dto.js` 是**唯一**的响应形状来源。磁盘结构（`releases.json`）与它刻意分开：API 想加 `download_url` 不会污染磁盘文件，想藏 `uploaded_ip` 也不会少历史字段。
 
 | 字段 | 类型 | 来源 | 说明 |
 |---|---|---|---|
@@ -527,7 +527,7 @@ npm test        # = node scripts/test-b.mjs
 | `POST /api/releases/:id/unyank` | 同上 | 同上 |
 | `DELETE /api/orphans` | 路由不存在 | 已实现，另加 `GET /api/orphans` 与 `?path=` 单删 |
 
-补别名只改了 `routes/index.js`（该文件归 A，本次改动已同步），`releases.js` 的业务逻辑没有为此重写一遍。
+补别名只改了 `src/routes/index.js`（该文件归 A，本次改动已同步），`releases.js` 的业务逻辑没有为此重写一遍。
 
 还有一处**语义层面**的差异保留着：`catalog` 的实际签名是 `get/getById/apply/withRecord/latest`，方案冻结表写的是 `has/find/add/setStatus`。代码是唯一事实来源，契约文档（`docs/api-contract.md`）需要按代码修正，否则新人照文档写会踩空。
 
@@ -537,7 +537,7 @@ npm test        # = node scripts/test-b.mjs
 
 接口一改，三处必须同步：
 
-1. `routes/dto.js` 或 handler 的返回值
+1. `src/routes/dto.js` 或 handler 的返回值
 2. 本文档（`docs/zxp/api.md`）
 3. 管理页前端（`public/admin.js` 消费的字段）
 

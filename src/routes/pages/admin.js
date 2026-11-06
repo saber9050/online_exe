@@ -1,10 +1,10 @@
 // 管理页渲染：状态条 + 上传区 + 版本列表 + 清理建议。
 // 归属：成员 B。这里只做「数据装配」，不做 HTML 决策，模板变量形状见 docs/zxp/development.md §7.2。
 import { cfg } from '../../config.js'
-import { catalog } from '../../lib/catalog.js'
-import { stats } from '../../lib/stats.js'
-import { storage } from '../../lib/storage.js'
-import { PLATFORM_GROUPS } from '../../lib/constants.js'
+import { catalog } from '../../catalog/catalog.js'
+import { stats } from '../../catalog/stats.js'
+import { storage } from '../../storage/storage.js'
+import { PLATFORM_GROUPS } from '../../constants.js'
 import { compareVersion } from '../../semver.js'
 import { toReleaseDto } from '../dto.js'
 // 筛选用接口层同一份实现：两处各写一遍必然漂移（改了接口忘了页面，用户会看到两套口径）

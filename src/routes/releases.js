@@ -1,13 +1,13 @@
 // 版本列表 / 撤回 / 恢复 / 删除（墓碑）。
-// 归属：成员 B（管理页接口层）。磁盘结构与落盘由成员 A 的 lib/catalog.js、lib/persist.js 负责，
+// 归属：成员 B（管理页接口层）。磁盘结构与落盘由成员 A 的 src/catalog/catalog.js、src/catalog/persist.js 负责，
 // 本文件不允许自己拼路径、自己写 releases.json。
 import { cfg } from '../config.js'
-import { catalog } from '../lib/catalog.js'
-import { storage } from '../lib/storage.js'
-import { stats } from '../lib/stats.js'
-import { enqueueWrite, writeAtomic, serialize } from '../lib/persist.js'
+import { catalog } from '../catalog/catalog.js'
+import { storage } from '../storage/storage.js'
+import { stats } from '../catalog/stats.js'
+import { enqueueWrite, writeAtomic, serialize } from '../catalog/persist.js'
 import { compareVersion } from '../semver.js'
-import { listOrphans, removeOrphan, clearOrphans } from '../lib/orphan.js'
+import { listOrphans, removeOrphan, clearOrphans } from '../catalog/orphan.js'
 import { toReleaseDto } from './dto.js'
 
 /**
@@ -217,7 +217,7 @@ export async function orphanListHandler(req, res, next) {
  * DELETE /api/orphans?path=xxx  → 只删一个（管理页单行操作用）
  *
  * 两种语义共用一个路由：方案 7.4 只冻结了「清空」，单删是管理页验收项 #14 的必要补充。
- * 单个删除的路径安全校验在 lib/orphan.js 里做（必须落在 data/orphan/ 之内）。
+ * 单个删除的路径安全校验在 src/catalog/orphan.js 里做（必须落在 data/orphan/ 之内）。
  */
 export async function orphanDeleteHandler(req, res, next) {
   try {
@@ -227,7 +227,7 @@ export async function orphanDeleteHandler(req, res, next) {
     }
     res.json(await clearOrphans())
   } catch (e) {
-    // 404 / 400 由 lib/orphan.js 带 status 抛出，统一错误中间件按 status 输出
+    // 404 / 400 由 src/catalog/orphan.js 带 status 抛出，统一错误中间件按 status 输出
     next(e)
   }
 }

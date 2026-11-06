@@ -3,8 +3,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
-import { cfg } from '../config.js'
-import { ensureDirs, writeAtomic, serialize } from '../lib/persist.js'
+import { cfg } from '../src/config.js'
+import { ensureDirs, writeAtomic, serialize } from '../src/catalog/persist.js'
 
 const COMBOS = [
   ['windows7', 'x64', '.exe'],

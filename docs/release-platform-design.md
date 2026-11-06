@@ -355,14 +355,18 @@ online_exe/
 ├── package.json
 ├── package-lock.json
 ├── src/
-│   ├── server.js              # 入口：http server + 三个超时 + 启动自检
-│   ├── app.js                 # Express 实例、中间件、路由挂载
-│   ├── config.js              # 环境变量装载与默认值
+│   ├── server.js              # 入口：启动自检 + http server + 四个超时 + 优雅退出
+│   ├── app.js                 # Express 实例、中间件、路由挂载、EJS locals
+│   ├── config.js              # 环境变量装载与默认值（路径基于项目根，不依赖 cwd）
+│   ├── semver.js              # 解析、拆分、比较
+│   ├── constants.js           # 8 组合白名单、平台/架构标签、下载页 OS 分组
+│   ├── format.js              # 展示层格式化：字节数、UTC → 本地时间
 │   ├── catalog/
 │   │   ├── types.js           # JSDoc 类型定义（不参与运行）
-│   │   ├── catalog.js         # 内存索引、排序、latest、inflight 占位
-│   │   ├── persist.js         # 原子写、三态加载、tmp 清理、对账
-│   │   └── stats.js           # 下载计数（内存累加 + 定时落盘）
+│   │   ├── catalog.js         # 内存索引、唯一键、排序、latest
+│   │   ├── persist.js         # 原子写、三态加载、tmp 清理、对账、串行写队列
+│   │   ├── stats.js           # 下载计数（内存累加 + 定时落盘）
+│   │   └── orphan.js          # 孤儿文件枚举 / 删除（data/orphan/）
 │   ├── routes/
 │   │   ├── index.js           # 路由表（只由 A 改）
 │   │   ├── dto.js             # HTTP 响应结构，与磁盘结构分离
@@ -371,14 +375,13 @@ online_exe/
 │   │   │   └── admin.js       # 管理页渲染（参数按 DTO 形状）
 │   │   ├── upload.js          # busboy 流式上传
 │   │   ├── download.js        # sendFile + 自定义 ETag + 计数
-│   │   └── releases.js        # 列表 / 撤回 / 恢复 / 删除
+│   │   └── releases.js        # 列表 / 撤回 / 恢复 / 删除 / 孤儿接口
 │   ├── middleware/
 │   │   ├── cidr.js            # /admin 与写接口的来源网段限制
 │   │   └── errors.js          # 统一错误响应
-│   ├── storage/
-│   │   ├── storage.js         # 接口：save / abs / remove / probe / freeBytes
-│   │   └── local.js           # 本地磁盘实现
-│   └── semver.js              # 解析、拆分、比较
+│   └── storage/
+│       ├── storage.js         # 接口门面：换存储只改这一行 import
+│       └── local.js           # 本地磁盘实现
 ├── views/                     # EJS 模板
 │   ├── partials/
 │   │   ├── head.ejs           # <head> + 顶部导航
@@ -393,6 +396,9 @@ online_exe/
 │   └── admin.js
 ├── fixtures/
 │   └── releases.sample.json   # 8 组合各 2 个版本，页面开发期的假数据
+├── scripts/                   # 开发脚本，不进镜像
+│   ├── seed-demo.js           # 灌演示数据（npm run seed）
+│   └── test-b.mjs             # 本机验收脚本（npm test）
 ├── data/                      # 运行时挂载，.dockerignore 排除
 │   ├── releases.json
 │   ├── releases.json.bak
@@ -401,6 +407,7 @@ online_exe/
 │   └── orphan/
 ├── Dockerfile
 ├── docker-compose.yml
+├── start.sh / start.bat       # 本机一键启动（开发用）
 ├── .dockerignore
 └── docs/
 ```

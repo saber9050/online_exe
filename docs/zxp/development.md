@@ -8,31 +8,30 @@
 
 ## 0. 读之前先对齐两件事
 
-**① 目录结构以本仓库为准。** 方案 4.2 写的是 `src/xxx`，本仓库是扁平结构（`server.js`、`app.js`、`routes/`、`lib/` 直接在根）。本文所有路径都是**实际路径**，两边的对应关系：
+**① 目录结构已与方案 4.2 一致。** 代码全部在 `src/` 下（`catalog/`、`routes/`、`middleware/`、`storage/`），`views/`、`public/`、`fixtures/`、`data/` 仍在项目根。本文所有路径都是**实际路径**，可以直接对照方案 4.2 的目录树。
 
-| 方案里的路径 | 本仓库实际路径 |
+方案目录树里原本没列、但实现必须有的 4 个文件（已在方案 4.2 补上）：
+
+| 文件 | 为什么需要 |
 |---|---|
-| `src/server.js` | `server.js` |
-| `src/app.js` | `app.js` |
-| `src/config.js` | `config.js` |
-| `src/routes/upload.js` | `routes/upload.js` |
-| `src/routes/releases.js` | `routes/releases.js` |
-| `src/routes/dto.js` | `routes/dto.js` |
-| `src/routes/pages/admin.js` | `routes/pages/admin.js` |
-| `src/middleware/errors.js` | `middleware/errors.js` |
-| `src/catalog/*`、`src/storage/*`、`src/semver.js` | `lib/catalog.js`、`lib/storage.js`、`semver.js` |
+| `src/constants.js` | 8 组合白名单、平台/架构标签、下载页 OS 分组 |
+| `src/format.js` | 展示层格式化（字节数、UTC→本地时间），只喂 EJS locals |
+| `src/catalog/orphan.js` | 孤儿文件的枚举/删除 + 路径逃逸防护 |
+| `src/storage/local.js` | 存储接口的本地实现；`src/storage/storage.js` 只做门面，换存储改那一行 import |
+
+另外 `src/catalog/types.js` 是纯 JSDoc 类型定义（不参与运行），给编辑器和 `import('./types.js').Release` 用。
 
 **② 我只改自己那半。** 方案 7.8 划死的边界：
 
 | 我负责（别人不动） | A 负责（我不动） |
 |---|---|
-| `config.js`、`app.js`、`server.js` | `routes/index.js`（全部路由挂载） |
-| `middleware/errors.js` | `middleware/cidr.js` |
-| `routes/dto.js`、`routes/upload.js`、`routes/releases.js` | `lib/catalog.js`、`lib/storage.js`、`lib/persist.js`、`lib/stats.js`、`semver.js` |
-| `routes/pages/admin.js`、`views/admin.ejs`、`public/admin.css`、`public/admin.js` | `routes/pages/download.js`、`views/download.ejs`、`views/partials/*`、`public/download.*` |
+| `src/config.js`、`src/app.js`、`src/server.js` | `src/routes/index.js`（全部路由挂载） |
+| `src/middleware/errors.js` | `src/middleware/cidr.js` |
+| `src/routes/dto.js`、`src/routes/upload.js`、`src/routes/releases.js` | `src/catalog/catalog.js`、`src/storage/storage.js`、`src/catalog/persist.js`、`src/catalog/stats.js`、`src/semver.js` |
+| `src/routes/pages/admin.js`、`views/admin.ejs`、`public/admin.css`、`public/admin.js` | `src/routes/pages/download.js`、`views/download.ejs`、`views/partials/*`、`public/download.*` |
 | `Dockerfile`、`docker-compose.yml`、`.dockerignore` | `fixtures/releases.sample.json` 的维护口径 |
 
-**必须同改**：`lib/constants.js`（8 组合白名单）、`package.json`、`package-lock.json`、`public/base.css`。
+**必须同改**：`src/constants.js`（8 组合白名单）、`package.json`、`package-lock.json`、`public/base.css`。
 
 ---
 
@@ -40,22 +39,22 @@
 
 | # | 文件 | 行数（约） | 一句话职责 | 出错的后果 |
 |---|---|---|---|---|
-| 1 | `config.js` | 33 | 环境变量装载、派生路径 | 路径错 → 数据写错地方 |
-| 2 | `app.js` | 34 | Express 实例、中间件顺序、路由挂载点 | 顺序错 → 大上传被打断 / 鉴权漏 |
-| 3 | `server.js` | 67 | 四个超时、IPv4 监听、优雅退出 | 超时没关 → 400MB 必断 |
-| 4 | `middleware/errors.js` | 30 | 404 + 按 `err.status` 输出统一错误 | 报错格式不统一，前端解析炸 |
-| 5 | `routes/dto.js` | 29 | 磁盘结构 → HTTP 结构映射 | 磁盘 JSON 被响应格式污染 |
-| 6 | `routes/upload.js` | 330 | busboy 流式上传、查重、并发、空间预检 | 内存爆 / 进程被未捕获异常打死 |
-| 7 | `routes/releases.js` | 233 | 列表筛选、撤回/恢复、墓碑、孤儿接口 | 版本不可变被击穿 |
-| 8 | `lib/orphan.js` | 126 | 孤儿文件列出/单删/清空 + 路径逃逸防护 | `?path=../` 能把版本库删掉 |
-| 9 | `routes/pages/admin.js` | 99 | 管理页数据装配 | 状态条数字不对、按钮给错 |
+| 1 | `src/config.js` | 33 | 环境变量装载、派生路径 | 路径错 → 数据写错地方 |
+| 2 | `src/app.js` | 34 | Express 实例、中间件顺序、路由挂载点 | 顺序错 → 大上传被打断 / 鉴权漏 |
+| 3 | `src/server.js` | 67 | 四个超时、IPv4 监听、优雅退出 | 超时没关 → 400MB 必断 |
+| 4 | `src/middleware/errors.js` | 30 | 404 + 按 `err.status` 输出统一错误 | 报错格式不统一，前端解析炸 |
+| 5 | `src/routes/dto.js` | 29 | 磁盘结构 → HTTP 结构映射 | 磁盘 JSON 被响应格式污染 |
+| 6 | `src/routes/upload.js` | 330 | busboy 流式上传、查重、并发、空间预检 | 内存爆 / 进程被未捕获异常打死 |
+| 7 | `src/routes/releases.js` | 233 | 列表筛选、撤回/恢复、墓碑、孤儿接口 | 版本不可变被击穿 |
+| 8 | `src/catalog/orphan.js` | 126 | 孤儿文件列出/单删/清空 + 路径逃逸防护 | `?path=../` 能把版本库删掉 |
+| 9 | `src/routes/pages/admin.js` | 99 | 管理页数据装配 | 状态条数字不对、按钮给错 |
 | 10 | `views/admin.ejs` | 188 | 三段式页面骨架 + 孤儿面板 | IE 打开一片空白 |
 | 11 | `public/admin.css` | 141 | 管理页样式（不用 CSS 变量 / Grid） | — |
 | 12 | `public/admin.js` | 533 | 上传进度、409 自动 +1、行操作、孤儿面板 | 发版人重复填 8 遍表单 |
 | 13 | `scripts/test-b.mjs` | 506 | 接口冒烟测试（`npm test`，74 条断言） | 改完不知道有没有弄坏别的 |
 | 14 | `Dockerfile` / `docker-compose.yml` / `.dockerignore` | 29 / 28 / 10 | 单容器交付 | 内网起不来 / 数据丢失 |
 
-> `routes/index.js` 归 A，本次为补齐 `yank`/`unyank`/`orphans` 路由改了 6 行，已同步告知。
+> `src/routes/index.js` 归 A，本次为补齐 `yank`/`unyank`/`orphans` 路由改了 6 行，已同步告知。
 
 **对外的三个承诺**（方案 7.3）：
 
@@ -69,7 +68,7 @@
 
 这些签名是**我单方面消费**的，A 改了我就崩。方案 7.4 要求阶段 0 冻结，实际冻结口径**以代码为准**（方案里写的 `has/find/add/setStatus` 与现码不一致，见 §10 缺口 5）。
 
-### 2.1 版本索引 `lib/catalog.js`
+### 2.1 版本索引 `src/catalog/catalog.js`
 
 | 签名 | 返回 | 我在哪用 |
 |---|---|---|
@@ -82,7 +81,7 @@
 
 **硬约束**：`apply()` 必须在 `writeAtomic()` 成功之后调。顺序反了，写盘失败时内存有记录、磁盘没有，重启后记录消失、文件变孤儿。
 
-### 2.2 文件存储 `lib/storage.js`
+### 2.2 文件存储 `src/storage/storage.js`
 
 | 签名 | 用途 |
 |---|---|
@@ -96,7 +95,7 @@
 | `storage.orphanStats()` | 状态条「孤儿 N 个 / X MB」 |
 | `storage.probe()` | `/healthz` 写盘探针 |
 
-### 2.3 落盘队列 `lib/persist.js`
+### 2.3 落盘队列 `src/catalog/persist.js`
 
 | 签名 | 用途 | 注意 |
 |---|---|---|
@@ -109,18 +108,18 @@
 
 | 模块 | 签名 | 用途 |
 |---|---|---|
-| `lib/stats.js` | `stats.get(id)` / `stats.flush()` / `stats.stop()` | 列表行下载数、退出前落盘 |
-| `semver.js` | `parseVersion(raw)` → `{version, major, minor, patch, prerelease, is_prerelease}` \| `null` | 上传入口校验 + 归一化（内部已剥 `v`） |
-| `semver.js` | `compareVersion(a, b)` | 列表排序、清理建议 |
-| `lib/constants.js` | `PLATFORM_ARCH_SET` / `PLATFORM_GROUPS` / `platformLabel` / `archLabel` / `comboLabel` | 白名单校验 + 中文展示 |
-| `middleware/cidr.js` | `adminGuard` | 我不用，但**依赖它挂在 `/api` 上** |
-| `lib/store.js` | `initStore()` | `server.js` 启动第 0 步（A 实现：建目录 / 三态加载 / 清 tmp / 对账） |
+| `src/catalog/stats.js` | `stats.get(id)` / `stats.flush()` / `stats.stop()` | 列表行下载数、退出前落盘 |
+| `src/semver.js` | `parseVersion(raw)` → `{version, major, minor, patch, prerelease, is_prerelease}` \| `null` | 上传入口校验 + 归一化（内部已剥 `v`） |
+| `src/semver.js` | `compareVersion(a, b)` | 列表排序、清理建议 |
+| `src/constants.js` | `PLATFORM_ARCH_SET` / `PLATFORM_GROUPS` / `platformLabel` / `archLabel` / `comboLabel` | 白名单校验 + 中文展示 |
+| `src/middleware/cidr.js` | `adminGuard` | 我不用，但**依赖它挂在 `/api` 上** |
+| `src/server.js` | `initStore()` | `src/server.js` 启动第 0 步（A 实现：建目录 / 三态加载 / 清 tmp / 对账） |
 
 ---
 
 ## 3. 运行时三件套
 
-### 3.1 `config.js`
+### 3.1 `src/config.js`
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
@@ -136,7 +135,7 @@
 
 路径一律从 `import.meta.dirname` 派生（`root = import.meta.dirname`），**不用 `process.cwd()`**：ESM 里没有 `__dirname`，而 `cwd` 在 `docker exec`、systemd、换工作目录时会变，表现为静态资源静默 404。
 
-### 3.2 `app.js`：中间件顺序不能动
+### 3.2 `src/app.js`：中间件顺序不能动
 
 ```text
 1. app.set('view engine' / 'views')      ← 用 config 的绝对路径
@@ -159,7 +158,7 @@
 
 `/healthz` **不能**挂 `adminGuard`——Docker 探针从 `127.0.0.1` 打进来，网段限制一开就会把容器标成 unhealthy，表现为「服务没挂但一直重启」。
 
-### 3.3 `server.js`：四个超时（最大坑）
+### 3.3 `src/server.js`：四个超时（最大坑）
 
 | 参数 | Node 默认 | 必须 | 不改的后果 |
 |---|---|---|---|
@@ -200,30 +199,30 @@ SIGTERM
 
 ## 4. 错误与 DTO
 
-### 4.1 `middleware/errors.js`
+### 4.1 `src/middleware/errors.js`
 
 | 处理器 | 行为 |
 |---|---|
 | `notFound` | `404` + 纯文本 `not found` |
 | `errorHandler(err, req, res, next)` | `status = err.status ?? 500` → 5xx 打完整日志并只回「服务器内部错误」，4xx 回 `err.message` → `headersSent` 时 **`res.destroy()`** |
 
-`err.status` 这一条是业务层偷懒的正道：`lib/orphan.js` 里 `throw httpError(400, '路径非法')`，handler 只写 `next(e)`，不用每处都 `res.status(x).json()`。5xx 永远不把内部信息吐出去，细节留在日志里。
+`err.status` 这一条是业务层偷懒的正道：`src/catalog/orphan.js` 里 `throw httpError(400, '路径非法')`，handler 只写 `next(e)`，不用每处都 `res.status(x).json()`。5xx 永远不把内部信息吐出去，细节留在日志里。
 
 `headersSent` 分支必须 `destroy()`。写成「什么都不做」的话，传输中途出错时连接会挂在那里等 `keepAliveTimeout`，用户侧表现为「下载卡死」。
 
-### 4.2 `routes/dto.js`：磁盘结构 ≠ 响应结构
+### 4.2 `src/routes/dto.js`：磁盘结构 ≠ 响应结构
 
 `toReleaseDto(rec)` 输出 22 个字段（见 `api.md` §8）。三条纪律：
 
 1. **不许与磁盘对象共用引用**，必须是新对象（现在就是 `return { ... }` 全量重建）
 2. 派生字段（`platformLabel` / `archLabel` / `comboLabel` / `download_url`）只在这里出现，**永不写进 `releases.json`**
-3. **A 的 `routes/pages/download.js` 不许 import 这个文件**（方案 7.5 的硬边界）。一旦 A 拿 DTO 渲染下载页，我改个字段名就会静默弄坏他的页面
+3. **A 的 `src/routes/pages/download.js` 不许 import 这个文件**（方案 7.5 的硬边界）。一旦 A 拿 DTO 渲染下载页，我改个字段名就会静默弄坏他的页面
 
 `GET /api/releases` 在 DTO 之上再叠一个 `downloads`，这个字段**只出现在列表响应**，上传 201 响应里没有。
 
 ---
 
-## 5. 上传 `routes/upload.js`
+## 5. 上传 `src/routes/upload.js`
 
 ### 5.1 请求形状与「为什么元数据走 query」
 
@@ -382,7 +381,7 @@ curl -s -o /dev/null -w "healthz=%{http_code}\n" http://127.0.0.1:8080/healthz
 
 ---
 
-## 6. 版本管理 `routes/releases.js`
+## 6. 版本管理 `src/routes/releases.js`
 
 ### 6.1 列表筛选矩阵
 
@@ -441,7 +440,7 @@ catalog.apply(record)
 
 ## 7. 管理页
 
-### 7.1 `routes/pages/admin.js` 的职责
+### 7.1 `src/routes/pages/admin.js` 的职责
 
 只做**数据装配**，不做渲染决策。四块输出：
 
@@ -610,7 +609,7 @@ docker compose logs -f
 | 8 | 8 个平台并发全部成功，总耗时接近单包 | 8 个 `curl &` + `time` |
 | 9 | 400MB 不 OOM | `docker stats` 内存恒定百兆内 |
 | 10 | 传输超 5 分钟不中断 | `curl --limit-rate 1M` 传 400MB |
-| 14 | 孤儿文件在管理页可见：状态条个数/大小正确，点开能看路径、能单个删、能全部清 | 已实现，见 `lib/orphan.js` 与管理页孤儿面板 |
+| 14 | 孤儿文件在管理页可见：状态条个数/大小正确，点开能看路径、能单个删、能全部清 | 已实现，见 `src/catalog/orphan.js` 与管理页孤儿面板 |
 | 17 | 挂载目录改只读 → `/healthz` 503、容器 unhealthy | `chmod -R a-w /srv/online_exe/data` |
 | 21 | `docker rm -f` 后 `up -d`，记录与文件都在 | — |
 | 22 | 宿主机重启自动拉起 | `reboot` |
@@ -633,7 +632,7 @@ docker compose logs -f
 | # | 缺口 | 影响 | 处理 |
 |---|---|---|---|
 | 1 | 冻结表的 `POST /api/releases/:id/yank`、`/unyank` 不存在，只有 `PATCH {status}` | A 或 CI 按冻结表调用会 404 | ✅ 已加两条别名路由，与 `PATCH` 共用 `setStatus()` 一份实现 |
-| 2 | `DELETE /api/orphans` 不存在，状态条只有数字、没有路径列表 | 验收 #14 过不了；`orphan/` 会悄悄涨满盘 | ✅ 新增 `lib/orphan.js` + `GET /api/orphans` + `DELETE /api/orphans?path=`，管理页面板可展开、可单删、可清空 |
+| 2 | `DELETE /api/orphans` 不存在，状态条只有数字、没有路径列表 | 验收 #14 过不了；`orphan/` 会悄悄涨满盘 | ✅ 新增 `src/catalog/orphan.js` + `GET /api/orphans` + `DELETE /api/orphans?path=`，管理页面板可展开、可单删、可清空 |
 | 3 | `?status=乱写` 落不进任何分支 → 连墓碑一起返回 | 已删除记录泄露 | ✅ 改白名单查表：接口层非法值 400，页面层回落 `all` |
 | 4 | `adminGuard` 的 403 是纯文本 | CI 里 `JSON.parse` 直接抛，排查方向被带偏 | ✅ 改 `{ error }` JSON |
 | 5 | `catalog` 实际签名 `get/getById/apply/withRecord/latest`，冻结表写 `has/find/add/setStatus` | 新人照文档写必踩空 | ⏳ 代码为准，需更新 `docs/api-contract.md`（纯文档工作，不阻塞开发） |
@@ -663,7 +662,7 @@ docker compose logs -f
 |---|---|
 | 分支 | `feat/admin-page`，小步合并，`main` 保护 |
 | 粒度 | 一个功能一个提交，别攒一天 |
-| 同改文件 | `lib/constants.js`、`package.json`、`package-lock.json`、`public/base.css` — 改前先说 |
+| 同改文件 | `src/constants.js`、`package.json`、`package-lock.json`、`public/base.css` — 改前先说 |
 | 加依赖 | 必须两人同意，`package.json` 与 `package-lock.json` 同时更新 |
 | 接口变更 | 「先说 → 同改 → 通知」，同时更新 `docs/zxp/api.md` |
 | 代码评审 | 我审 A 的下载页（ES5 / 无 CDN / 不 import dto.js），A 审我的上传（文件有没有进内存、有没有绕过 DTO） |

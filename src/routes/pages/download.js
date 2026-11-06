@@ -1,7 +1,7 @@
 // 下载页渲染：只组装模板变量，不 import dto 之外的响应结构。
-import { catalog } from '../../lib/catalog.js'
-import { stats } from '../../lib/stats.js'
-import { PLATFORM_GROUPS, OS_FAMILIES } from '../../lib/constants.js'
+import { catalog } from '../../catalog/catalog.js'
+import { stats } from '../../catalog/stats.js'
+import { PLATFORM_GROUPS, OS_FAMILIES } from '../../constants.js'
 import { compareVersion } from '../../semver.js'
 import { toReleaseDto } from '../dto.js'
 

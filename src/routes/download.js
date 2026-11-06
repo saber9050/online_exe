@@ -1,9 +1,9 @@
 // GET /dl/:version/:combo — sendFile 原生支持 Range / If-Range，自定义 ETag 用 sha256。
 import fs from 'node:fs/promises'
-import { catalog } from '../lib/catalog.js'
-import { storage } from '../lib/storage.js'
-import { stats } from '../lib/stats.js'
-import { PLATFORM_ARCH_SET } from '../lib/constants.js'
+import { catalog } from '../catalog/catalog.js'
+import { storage } from '../storage/storage.js'
+import { stats } from '../catalog/stats.js'
+import { PLATFORM_ARCH_SET } from '../constants.js'
 
 /** @param {import('express').Request} req @param {import('express').Response} res */
 export async function downloadHandler(req, res, next) {

@@ -1,5 +1,5 @@
-// HTTP 响应结构与磁盘结构分离。磁盘格式在 lib/catalog，响应格式在这里。
-import { archLabel, platformLabel, comboLabel } from '../lib/constants.js'
+// HTTP 响应结构与磁盘结构分离。磁盘格式在 src/catalog/types.js，响应格式在这里。
+import { archLabel, platformLabel, comboLabel } from '../constants.js'
 
 /** @param {any} rec */
 export function toReleaseDto(rec) {

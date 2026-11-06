@@ -1,10 +1,10 @@
 // 孤儿文件管理：data/orphan/ 下的「磁盘上有、releases.json 里没有」的文件。
 //
 // 归属说明：这个文件属于成员 B（管理页的「孤儿可见 + 可清理」是 B 的交付，验收项 #14）。
-// 成员 A 的 lib/storage.js 只提供 orphanStats()（个数 + 总字节），查询/删除路径放在这里，
+// 成员 A 的 src/storage/storage.js 只提供 orphanStats()（个数 + 总字节），查询/删除路径放在这里，
 // 目的是不往 A 的文件里塞展示层需求，避免两边同时改同一个文件。
 //
-// 生命周期：启动对账（lib/persist.js reconcile）把 src 文件 rename 成
+// 生命周期：启动对账（src/catalog/persist.js 的 reconcile）把 src 文件 rename 成
 //   data/orphan/{version}__{platform}-{arch}__package.bin.{时间戳}
 // 也就是「平铺 + 带时间戳」的命名。对账只搬走、不删除，因此这里必须有入口，
 // 否则 orphan/ 会悄悄涨满磁盘 —— 和「启动清理 tmp」要解决的是同一类问题：只清不展示等于没解决。

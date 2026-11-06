@@ -1,7 +1,8 @@
-// 环境变量装载与默认值。所有路径基于项目根目录，避免依赖进程工作目录。
+// 环境变量装载与默认值。所有路径基于项目根目录，不依赖进程工作目录。
 import path from 'node:path'
 
-const root = import.meta.dirname
+// 本文件在 src/ 下，项目根是上一级
+const root = path.join(import.meta.dirname, '..')
 
 /** @typedef {{ port:number, dataDir:string, maxUploadMb:number, keepPerPlatform:number,
  * appName:string, appDescription:string, timezone:string, adminAllowCidr:string,

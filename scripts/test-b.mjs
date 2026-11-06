@@ -33,7 +33,7 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
 
 /** 起一个真实服务进程，返回操作句柄 */
 function startServer({ dataDir, port, env = {} }) {
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/server.js'], {
     cwd: ROOT,
     env: { ...process.env, PORT: String(port), DATA_DIR: dataDir, TZ: 'Asia/Shanghai', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
