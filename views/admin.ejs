@@ -13,9 +13,22 @@
     <div class="stat"><span class="stat-label">占用合计</span><b><%= fmtSize(summary.occupied) %></b></div>
     <div class="stat">
       <span class="stat-label">孤儿文件</span>
-      <b><%= summary.orphan.count %> 个</b>
-      <span class="dim">/ <%= fmtSize(summary.orphan.bytes) %></span>
+      <b id="orphan-count"><%= summary.orphan.count %> 个</b>
+      <span class="dim" id="orphan-bytes">/ <%= fmtSize(summary.orphan.bytes) %></span>
+      <button type="button" class="btn btn-sm" id="orphan-toggle">查看</button>
     </div>
+  </section>
+
+  <%# 孤儿文件面板：默认折叠，点「查看」由 admin.js 拉 GET /api/orphans 填充。
+      为什么懒加载而不是服务端直出：孤儿可能有几十上百条，塞进首屏 HTML 只是拖慢打开速度，
+      而这块内容 99% 的时间没人看。 %>
+  <section class="panel orphan-panel" id="orphan-panel" hidden>
+    <div class="panel-head">
+      <h2>孤儿文件</h2>
+      <span class="dim">磁盘上有、版本记录里没有的文件。启动对账把它们移入 <code>data/orphan/</code> 待人工确认，不会自动删除。</span>
+      <button type="button" class="btn btn-sm btn-danger" id="orphan-clear">全部清理</button>
+    </div>
+    <div id="orphan-body"><p class="empty">加载中…</p></div>
   </section>
 
   <section class="panel">

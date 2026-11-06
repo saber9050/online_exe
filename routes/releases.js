@@ -7,6 +7,7 @@ import { storage } from '../lib/storage.js'
 import { stats } from '../lib/stats.js'
 import { enqueueWrite, writeAtomic, serialize } from '../lib/persist.js'
 import { compareVersion } from '../semver.js'
+import { listOrphans, removeOrphan, clearOrphans } from '../lib/orphan.js'
 import { toReleaseDto } from './dto.js'
 
 /**
@@ -192,6 +193,41 @@ export async function deleteHandler(req, res, next) {
 
     res.json(toReleaseDto(updated || rel))
   } catch (e) {
+    next(e)
+  }
+}
+
+/**
+ * GET /api/orphans —— 列出 data/orphan/ 下的孤儿文件。
+ *
+ * 孤儿 = 「磁盘上有、releases.json 里没有」。启动对账把它们从 releases/ 搬进来待人工确认，
+ * 从来不自动删。所以必须给管理页一个能看见路径、能量大小的入口，
+ * 否则这个目录会悄悄涨满磁盘，而状态条上只有一个数字，谁也判断不了该不该清。
+ */
+export async function orphanListHandler(req, res, next) {
+  try {
+    res.json(await listOrphans())
+  } catch (e) {
+    next(e)
+  }
+}
+
+/**
+ * DELETE /api/orphans           → 清空全部孤儿文件
+ * DELETE /api/orphans?path=xxx  → 只删一个（管理页单行操作用）
+ *
+ * 两种语义共用一个路由：方案 7.4 只冻结了「清空」，单删是管理页验收项 #14 的必要补充。
+ * 单个删除的路径安全校验在 lib/orphan.js 里做（必须落在 data/orphan/ 之内）。
+ */
+export async function orphanDeleteHandler(req, res, next) {
+  try {
+    if (req.query.path !== undefined) {
+      const one = await removeOrphan(String(req.query.path))
+      return res.json({ removed: 1, bytes: one.size, path: one.path })
+    }
+    res.json(await clearOrphans())
+  } catch (e) {
+    // 404 / 400 由 lib/orphan.js 带 status 抛出，统一错误中间件按 status 输出
     next(e)
   }
 }

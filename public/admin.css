@@ -12,6 +12,28 @@ main.wrap { padding-top: 24px; }
 .stat { display: inline-block; margin-right: 38px; font-size: 13px; color: #5b6478; }
 .stat-label { color: #8a93a6; margin-right: 8px; }
 .stat b { color: #1f2430; font-size: 15px; }
+/* 状态条里的内联按钮（孤儿「查看」）：不能把行高撑开，所以贴着文字基线走 */
+.stat .btn-sm { margin-left: 10px; vertical-align: 1px; }
+
+/* 孤儿文件面板 */
+.orphan-panel .panel-head .btn { float: right; }
+.orphan-panel code {
+  font-family: Consolas, Monaco, monospace;
+  background: #f4f6fa;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #3d4657;
+}
+/* 对账搬进来的文件名是 `{version}__{platform}-{arch}__package.bin.{时间戳}`，
+   不换行会把表格撑得很宽，这里允许断行并给等宽字体便于肉眼比对 */
+.orphan-path {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  color: #5b6478;
+  word-break: break-all;
+  max-width: 520px;
+}
+.empty.err { color: #c0392b; }
 
 /* 面板 */
 .panel {

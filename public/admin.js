@@ -386,4 +386,148 @@
       setTimeout(function () { tr.classList.remove('row-flash') }, 3000)
     }
   }
+
+  // ── 孤儿文件：懒加载 / 单个删除 / 全部清理 ─────────────────────────────
+  // 孤儿 = 磁盘上有、版本记录里没有的文件（启动对账把它们移入 data/orphan/ 待确认）。
+  // 这块内容平时没人看，所以默认折叠、点「查看」才请求，不占首屏。
+  var orphanToggle = $('orphan-toggle')
+  var orphanPanel = $('orphan-panel')
+  var orphanBody = $('orphan-body')
+  var orphanClear = $('orphan-clear')
+  var orphanCountEl = $('orphan-count')
+  var orphanBytesEl = $('orphan-bytes')
+  var orphanLoaded = false
+
+  /**
+   * 统一取 JSON 并处理错误。
+   * 注意 404（路由没命中）返回的是纯文本，JSON.parse 会抛，必须降级成 { error: 文本 }，
+   * 否则这里会抛一个和真实原因无关的 SyntaxError。
+   */
+  function fetchJson(url, options) {
+    return fetch(url, options).then(function (r) {
+      return r.text().then(function (text) {
+        var data = {}
+        try { data = text ? JSON.parse(text) : {} } catch (e2) { data = { error: text || ('HTTP ' + r.status) } }
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status))
+        return data
+      })
+    })
+  }
+
+  /** 把一句话塞进孤儿面板（用于空态、加载中、错误提示） */
+  function setOrphanHint(text, isError) {
+    orphanBody.innerHTML = ''
+    var p = document.createElement('p')
+    p.className = isError ? 'empty err' : 'empty'
+    p.textContent = text
+    orphanBody.appendChild(p)
+  }
+
+  /** 状态条上的个数与大小跟着列表同步，省一次整页刷新 */
+  function syncOrphanStat(count, bytes) {
+    if (orphanCountEl) orphanCountEl.textContent = count + ' 个'
+    if (orphanBytesEl) orphanBytesEl.textContent = '/ ' + fmtBytes(bytes)
+  }
+
+  /** 渲染孤儿列表。全部走 textContent —— 文件名来自磁盘，可能含尖括号，绝不能当 HTML 拼 */
+  function renderOrphans(data) {
+    syncOrphanStat(data.count, data.bytes)
+
+    if (!data.orphans || data.orphans.length === 0) {
+      setOrphanHint('没有孤儿文件。', false)
+      return
+    }
+
+    orphanBody.innerHTML = ''
+    var table = document.createElement('table')
+    table.className = 'table'
+    var thead = document.createElement('thead')
+    thead.innerHTML = '<tr><th>路径（相对 data/orphan/）</th><th>大小</th><th>移入时间</th><th>操作</th></tr>'
+    table.appendChild(thead)
+
+    var tbody = document.createElement('tbody')
+    data.orphans.forEach(function (f) {
+      var tr = document.createElement('tr')
+
+      var tdPath = document.createElement('td')
+      tdPath.className = 'orphan-path'
+      tdPath.textContent = f.path
+      tr.appendChild(tdPath)
+
+      var tdSize = document.createElement('td')
+      tdSize.textContent = fmtBytes(f.size)
+      tr.appendChild(tdSize)
+
+      var tdTime = document.createElement('td')
+      // 服务端给的是 UTC ISO 串，浏览器按本地时区渲染，与页面其他地方口径一致
+      tdTime.textContent = new Date(f.mtime).toLocaleString()
+      tr.appendChild(tdTime)
+
+      var tdOp = document.createElement('td')
+      tdOp.className = 'ops'
+      var btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'btn btn-sm btn-danger'
+      btn.textContent = '删除'
+      btn.addEventListener('click', function () {
+        removeOrphan(f.path, btn)
+      })
+      tdOp.appendChild(btn)
+      tr.appendChild(tdOp)
+
+      tbody.appendChild(tr)
+    })
+    table.appendChild(tbody)
+    orphanBody.appendChild(table)
+  }
+
+  function loadOrphans() {
+    setOrphanHint('加载中…', false)
+    return fetchJson('/api/orphans')
+      .then(renderOrphans)
+      .catch(function (err) { setOrphanHint('加载失败：' + err.message, true) })
+  }
+
+  /** 删单个：孤儿不在任何版本记录里，删掉就是真没了，所以要确认一次 */
+  function removeOrphan(path, btn) {
+    if (!window.confirm('删除该孤儿文件？\n' + path + '\n\n它不在任何版本记录里，删除后不可恢复。')) return
+    btn.disabled = true
+    fetchJson('/api/orphans?path=' + encodeURIComponent(path), { method: 'DELETE' })
+      .then(function () { return loadOrphans() })
+      .catch(function (err) {
+        btn.disabled = false
+        window.alert('删除失败：' + err.message)
+      })
+  }
+
+  if (orphanToggle && orphanPanel) {
+    orphanToggle.addEventListener('click', function () {
+      var opening = orphanPanel.hidden
+      orphanPanel.hidden = !opening
+      orphanToggle.textContent = opening ? '收起' : '查看'
+      // 首次展开才请求；收起再展开不重复拉，点「删除」后会主动重新拉
+      if (opening && !orphanLoaded) {
+        orphanLoaded = true
+        loadOrphans()
+      }
+    })
+  }
+
+  if (orphanClear) {
+    orphanClear.addEventListener('click', function () {
+      var n = orphanCountEl ? orphanCountEl.textContent : ''
+      if (!window.confirm('清空全部孤儿文件（当前 ' + n + '）？\n这些文件不在任何版本记录里，删除后不可恢复。')) return
+      orphanClear.disabled = true
+      fetchJson('/api/orphans', { method: 'DELETE' })
+        .then(function (res) {
+          window.alert('已清理 ' + res.removed + ' 个文件，释放 ' + fmtBytes(res.bytes))
+          // 清空是全局动作，状态条与列表一起刷新最省事
+          location.reload()
+        })
+        .catch(function (err) {
+          orphanClear.disabled = false
+          window.alert('清理失败：' + err.message)
+        })
+    })
+  }
 })()

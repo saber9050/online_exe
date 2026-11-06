@@ -42,5 +42,9 @@ router.post('/api/releases/:id/unyank', releases.unyankHandler)
 // 删除：墓碑式，记录保留、文件删除
 router.delete('/api/releases/:id', releases.deleteHandler)
 
+// 孤儿文件（磁盘上有、记录里没有）：先看得见，才能判断该不该清
+router.get('/api/orphans', releases.orphanListHandler)
+router.delete('/api/orphans', releases.orphanDeleteHandler)
+
 // ── 下载直链（成员 A）────────────────────────────────────
 router.get('/dl/:version/:combo', downloadHandler)
