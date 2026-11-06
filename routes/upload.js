@@ -296,15 +296,29 @@ export async function uploadHandler(req, res) {
       state = 'aborted'
       await cleanup()
       if (!res.headersSent) {
-        const code =
-          { DUPLICATE: 409, NO_FILE: 400, FILE_TOO_LARGE: 413 }[err.message] ?? 500
-        const msg =
-          err.message === 'NO_FILE'
-            ? '请求中没有文件，请用 file 字段上传'
-            : err.message === 'FILE_TOO_LARGE'
-              ? `文件超过单包上限 ${cfg.maxUploadMb}MB`
-              : err.message
-        res.status(code).json({ error: msg })
+        // 错误码映射集中在一处：三个已知业务错误 + 兜底 500。
+        // 不要在状态码上写三元套三元，也不要把同一个映射散到多处。
+        const KNOWN = { DUPLICATE: 409, NO_FILE: 400, FILE_TOO_LARGE: 413 }
+        const code = KNOWN[err.message] ?? 500
+        const body = { error: '上传失败，请稍后重试' }
+
+        if (err.message === 'DUPLICATE') {
+          // 走到这里 = 入口查重通过、提交时发现已存在，只可能是并发竞态。
+          // 这里必须给中文文案：此前直接把 err.message 吐给前端，UI 上会显示大写英文 DUPLICATE。
+          // 同时带上已存在记录的 DTO，前端才能像入口 409 那样自动把补丁号 +1。
+          const cur = catalog.get(platform, arch, version)
+          body.error = `${version} / ${platform} / ${arch} 已存在，请改用新版本号`
+          if (cur) body.existing = toReleaseDto(cur)
+        } else if (err.message === 'NO_FILE') {
+          body.error = '请求中没有文件，请用 file 字段上传'
+        } else if (err.message === 'FILE_TOO_LARGE') {
+          body.error = `文件超过单包上限 ${cfg.maxUploadMb}MB`
+        } else if (err?.code) {
+          // 系统错误（ENOSPC / EACCES / EROFS…）：只回错误码，不回堆栈
+          body.error = `写盘失败（${err.code}），请检查磁盘后重试`
+        }
+
+        res.status(code).json(body)
       }
     } finally {
       inflight.delete(key)
