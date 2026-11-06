@@ -1,7 +1,7 @@
 // 下载页渲染：只组装模板变量，不 import dto 之外的响应结构。
 import { catalog } from '../../lib/catalog.js'
 import { stats } from '../../lib/stats.js'
-import { PLATFORM_GROUPS } from '../../lib/constants.js'
+import { PLATFORM_GROUPS, OS_FAMILIES } from '../../lib/constants.js'
 import { compareVersion } from '../../semver.js'
 import { toReleaseDto } from '../dto.js'
 
@@ -31,6 +31,18 @@ export function renderDownload(req, res) {
     return { ...g, arches, summary, mixed }
   })
 
+  // 两层聚合：OS 大类 → 子组（Windows 下是 Win7 / Win10·11）
+  const groupById = new Map(groups.map((g) => [g.id, g]))
+  const families = OS_FAMILIES.map((f) => {
+    const subs = f.platforms.map((id) => groupById.get(id)).filter(Boolean)
+    const archTotal = subs.reduce((n, g) => n + g.arches.length, 0)
+    const archReady = subs.reduce(
+      (n, g) => n + g.arches.filter((a) => !!a.latest).length,
+      0,
+    )
+    return { ...f, subs, archTotal, archReady }
+  })
+
   const history = catalog
     .list()
     .filter((r) => r.status !== 'deleted')
@@ -50,6 +62,7 @@ export function renderDownload(req, res) {
     pageCss: 'download',
     pageScript: 'download',
     groups,
+    families,
     history,
     totalCount,
   })

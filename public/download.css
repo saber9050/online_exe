@@ -31,19 +31,26 @@
 }
 .anchor-nav a:hover { border-color: #2f6fed; color: #2f6fed; text-decoration: none; }
 
-/* 平台区块 */
-.platform {
+/* OS 大类区块（Windows / macOS / Linux） */
+.family {
   background: #fff;
   border: 1px solid #e6e9ef;
   border-radius: 10px;
   padding: 20px 22px 22px;
   margin-top: 18px;
 }
-.platform-head { border-bottom: 1px solid #eef1f6; padding-bottom: 10px; margin-bottom: 8px; }
-.platform-head:after { content: ""; display: block; clear: both; }
-.platform-head h2 { display: inline-block; font-size: 18px; margin: 0; }
-.platform-count { float: right; color: #8a93a6; font-size: 12px; line-height: 28px; }
-.platform-note { color: #8a93a6; font-size: 13px; margin: 8px 0 0; }
+.family-head { border-bottom: 1px solid #eef1f6; padding-bottom: 10px; }
+.family-head:after { content: ""; display: block; clear: both; }
+.family-head h2 { display: inline-block; font-size: 19px; margin: 0; }
+.family-count { float: right; color: #8a93a6; font-size: 12px; line-height: 30px; }
+
+/* 大类下的子组（Windows 7 / Windows 10·11），同大类内用虚线分隔 */
+.subgroup { padding: 14px 0 2px; }
+.subgroup + .subgroup { border-top: 1px dashed #e6e9ef; margin-top: 6px; }
+.subgroup-head:after { content: ""; display: block; clear: both; }
+.subgroup-head h3 { display: inline-block; font-size: 15px; font-weight: 600; margin: 0; color: #1f2430; }
+.subgroup-count { float: right; color: #8a93a6; font-size: 12px; line-height: 24px; }
+.platform-note { color: #8a93a6; font-size: 13px; margin: 6px 0 0; }
 
 /* 架构卡片 */
 .cards { margin-top: 4px; }
@@ -84,3 +91,4 @@
 
 /* UA 自动定位到当前平台区块时给一点视觉提示 */
 .ua-target { border-color: #b9ccf5; box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.08); }
+.ua-sub .subgroup-head h3 { color: #2f6fed; }
