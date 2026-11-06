@@ -127,6 +127,8 @@
             </td>
             <td><%= r.downloads %></td>
             <td class="ops">
+              <%# 按钮按「status × file_missing」两个维度给，不给所有行同一套。
+                  两个维度是正交的：status 是发版人的意图，file_missing 是磁盘事实。 %>
               <% if (r.status === 'deleted') { %>
                 <span class="dim">—</span>
               <% } else { %>
@@ -138,7 +140,14 @@
                   <button type="button" class="btn btn-sm" data-action="yank" data-id="<%= r.id %>">撤回</button>
                 <% } %>
                 <% if (r.status === 'yanked') { %>
-                  <button type="button" class="btn btn-sm" data-action="restore" data-id="<%= r.id %>">恢复</button>
+                  <% if (r.file_missing) { %>
+                    <%# 文件没了还能「恢复」，只会让下载页多出一条点了就 404 的链接。
+                        服务端会 409 兜住，但让用户点了才失败属于交互缺陷，所以这里直接禁用并说明原因。 %>
+                    <button type="button" class="btn btn-sm" disabled
+                      title="文件缺失：请先用「重新上传」补齐同版本文件，再恢复">恢复</button>
+                  <% } else { %>
+                    <button type="button" class="btn btn-sm" data-action="restore" data-id="<%= r.id %>">恢复</button>
+                  <% } %>
                 <% } %>
                 <button type="button" class="btn btn-sm btn-danger" data-action="delete"
                   data-id="<%= r.id %>" data-version="<%= r.version %>">删除</button>
