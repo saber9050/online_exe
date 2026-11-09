@@ -1,8 +1,17 @@
-// POST /api/releases — busboy 流式上传。
-// 元数据走 query（先于 body 到达），文件走 multipart，边写边算 sha256。
+// POST /api/releases — 两种请求体协议，元数据统一走 query（先于 body 到达），边写边算 sha256。
+//
+//   ① multipart/form-data      —— CI / curl -F 用，busboy 解析，文件字段名必须是 file
+//   ② application/octet-stream —— 管理页用，body 就是文件本身，不需要 multipart 解析
+//
+// 为什么保留两套：部分运营商/企业网关的 DPI 会按 Content-Type 丢上传体。
+// 实测（2026-11-09，同一 5MB 文件、同一出口、同一个 URL，唯一变量是 Content-Type）：
+//   multipart/form-data      → 服务器网卡一个 body 包都收不到，连接被链路上的伪 RST 打断
+//   application/octet-stream → 19 个 1460 字节的 body 包全部到达
+// 所以管理页改走 ②，CI 的 curl -F 继续走 ①。两套协议不同，但落到同一套
+// 查重 / 占位 / 磁盘预检 / 提交逻辑，不要为它复制第二份状态机。
 import Busboy from 'busboy'
 import { pipeline } from 'node:stream/promises'
-import { Transform } from 'node:stream'
+import { PassThrough, Transform } from 'node:stream'
 import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
@@ -80,6 +89,25 @@ function newId() {
   // 20261105T021000-1f3a9c7e
   const ts = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '')
   return `${ts}-${randomBytes(4).toString('hex')}`
+}
+
+/**
+ * 从请求头取文本。
+ *
+ * HTTP 头只能是 ASCII（非 ASCII 会被浏览器直接抛 TypeError），
+ * 所以 changelog / filename 由前端 encodeURIComponent 后放进来，这里解回来。
+ * 解不开就当原样 —— 猜测编码比丢掉信息更难排查。
+ * @param {import('express').Request} req
+ * @param {string} name 小写头名
+ */
+function headerText(req, name) {
+  const raw = req.headers[name]
+  if (typeof raw !== 'string' || raw === '') return ''
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
 }
 
 async function getFreeBytes() {
@@ -182,17 +210,35 @@ function buildRecord({ id, parsed, platform, arch, filename, size, sha256, chang
 
 /** @param {import('express').Request} req @param {import('express').Response} res */
 export async function uploadHandler(req, res) {
+  // 先定协议，再谈别的：不认识的 Content-Type 直接拒，别把一段 JSON 当安装包写进磁盘。
+  const ctype = String(req.headers['content-type'] || '').toLowerCase()
+  const rawBody = ctype.startsWith('application/octet-stream')
+  const multipart = ctype.startsWith('multipart/form-data')
+  if (!rawBody && !multipart) {
+    logReject(req, 'bad_content_type', { contentType: ctype })
+    // 统一走 rejectEarly：客户端可能已经在推几百 MB 的 body，直接 json 会被 RST 吞掉，
+    // 前端只剩一句「连接被中断」，真正的原因永远看不到。
+    return rejectEarly(req, res, 400, {
+      error: 'Content-Type 必须是 multipart/form-data（file 字段）或 application/octet-stream（body 即文件）',
+    })
+  }
+
   const parsed = parseVersion(req.query.version)
   const platform = String(req.query.platform || '')
   const arch = String(req.query.arch || '')
+  const maxBytes = cfg.maxUploadMb * 1024 * 1024
 
   if (!parsed) {
     logReject(req, 'bad_version')
-    return res.status(400).json({ error: '版本号格式不合法，应为 MAJOR.MINOR.PATCH[-prerelease]' })
+    return rejectEarly(req, res, 400, {
+      error: '版本号格式不合法，应为 MAJOR.MINOR.PATCH[-prerelease]',
+    })
   }
   if (!PLATFORM_ARCH_SET.has(`${platform}-${arch}`)) {
     logReject(req, 'bad_platform')
-    return res.status(400).json({ error: `平台与架构组合不受支持：${platform}-${arch}` })
+    return rejectEarly(req, res, 400, {
+      error: `平台与架构组合不受支持：${platform}-${arch}`,
+    })
   }
 
   const version = parsed.version
@@ -226,8 +272,9 @@ export async function uploadHandler(req, res) {
   let sha256 = null
   let bytesWritten = 0
   let bytesReceived = 0
-  let userFilename = null
-  let changelog = ''
+  // 裸流没有 multipart 字段，文件名与更新说明只能走请求头；multipart 走字段，这两行会被覆盖
+  let userFilename = headerText(req, 'x-filename') || null
+  let changelog = headerText(req, 'x-changelog')
   let reserved = 0
   let released = false
   let sawFirstByte = false
@@ -406,6 +453,21 @@ export async function uploadHandler(req, res) {
         sawFirstByte = true
         logStage(req, 'first_byte', { afterMs: Date.now() - beganAt })
       }
+      // 裸流没有 busboy 的 fileSize 限流，自己顶一道；走 chunked（无 Content-Length）时
+      // 只有这里能拦。超限直接 abort，别把几十 GB 写进盘再报错。
+      //
+      // 这里**绝不能 cb(err)**：meter 上没有挂 'error' 监听，抛出去就是 uncaughtException，
+      // 整个进程会退（2026-11-09 实测：chunked 超限一次就够打死服务）。
+      // 正确做法是停上游 → 走 abort 统一出口 → 给响应留 1 秒再断，和 onIdle 同一套收尾。
+      if (rawBody && bytesReceived > maxBytes) {
+        req.unpipe(meter)
+        abort(413, `文件超过单包上限 ${cfg.maxUploadMb}MB`, 'file_too_large')
+        req.resume() // 把剩余 body 读掉丢弃，别让连接卡在半开状态
+        const timer = setTimeout(() => req.destroy(), 1000)
+        timer.unref?.()
+        cb(null, chunk)
+        return
+      }
       cb(null, chunk)
     },
   })
@@ -414,11 +476,23 @@ export async function uploadHandler(req, res) {
     logStage(req, 'body_done', { afterMs: Date.now() - beganAt, bytesReceived })
   })
 
-  logStage(req, 'begin', { contentLength: Number(req.headers['content-length'] || 0) })
+  logStage(req, 'begin', {
+    contentLength: Number(req.headers['content-length'] || 0),
+    mode: rawBody ? 'raw' : 'multipart',
+  })
 
   try {
     // 磁盘空间预检 + 预留额度（带超时：statfs 卡住不能把整个上传挂死）
     const contentLength = Number(req.headers['content-length'] || 0)
+
+    // 裸流的单包上限先按 Content-Length 拦一道，别等传完几百 MB 再报 413。
+    // 无 Content-Length（chunked）的情况在 meter 里兜底。
+    if (rawBody && contentLength > maxBytes) {
+      logReject(req, 'too_large', { maxBytes })
+      releaseOnce()
+      return rejectEarly(req, res, 413, { error: `文件超过单包上限 ${cfg.maxUploadMb}MB` })
+    }
+
     if (contentLength > 0) {
       let free
       try {
@@ -449,33 +523,12 @@ export async function uploadHandler(req, res) {
       return rejectEarly(req, res, 500, { error: '创建存储目录失败' })
     }
 
-    let bb
-    try {
-      bb = Busboy({
-        headers: req.headers,
-        defParamCharset: 'utf8',
-        limits: {
-          fileSize: cfg.maxUploadMb * 1024 * 1024,
-          files: 1,
-          fields: 10,
-          fieldSize: 64 * 1024,
-        },
-      })
-    } catch {
-      logReject(req, 'bad_multipart')
-      releaseOnce()
-      return rejectEarly(req, res, 400, { error: 'multipart 解析失败，请检查 Content-Type' })
-    }
-
-    bb.on('file', (name, stream, info) => {
-      if (name !== 'file') {
-        stream.resume()
-        return
-      }
-      if (!userFilename && info && info.filename) userFilename = info.filename
+    // ── 落盘管道：两种协议共用同一条 ──────────────────────────────────
+    // 入参是「文件字节流」：multipart 时是 busboy 的 file stream，裸流时是 req 的镜像。
+    // 必须当场 catch：abort 路径下 commit 不会执行，裸 promise 会变成未捕获异常。
+    /** @param {import('node:stream').Readable} stream */
+    function runFilePipeline(stream) {
       tmpPath = storage.tmpPath(version, platform, arch)
-
-      // 必须当场 catch：abort 路径下 commit 不会执行，裸 promise 会变成未捕获异常
       tasks.push(
         (async () => {
           const hash = createHash('sha256')
@@ -514,14 +567,64 @@ export async function uploadHandler(req, res) {
           bytesWritten = (await fs.stat(tmpPath)).size
         })().catch((err) => {
           taskErrors.push(err)
-          // 写盘错误时 pipeline 会销毁文件流，busboy 可能不再前进；主动 abort 兜底。
-          // 超限除外：它需要等 busboy 正常收尾，由 commit 统一返回 413。
+          // 写盘错误时 pipeline 会销毁文件流，上游可能不再前进；主动 abort 兜底。
+          // 超限除外：multipart 要等 busboy 正常收尾、由 commit 统一返回 413；
+          // 裸流超限已经在 meter 里 abort 过了，这里只记账。
           if (err && err.message !== 'FILE_TOO_LARGE') {
             abort(500, '写盘失败，请检查磁盘后重试', 'write_failed')
           }
           return null
         }),
       )
+    }
+
+    req.on('error', () => abort(400, '连接中断', 'request_error'))
+
+    req.on('close', () => {
+      if (!req.complete && state === 'receiving') abort(499, '客户端已断开', 'client_closed')
+    })
+
+    if (rawBody) {
+      // 裸流：body 就是文件本身。中间加一层 PassThrough，把「req 的读取」和
+      // 「落盘管道的生命周期」隔开 —— pipeline 完成时会把源流 destroy 掉，
+      // 直接拿 meter 当源会把 req.pipe(meter) 一起打断，req 就再也不会 end。
+      const fileStream = new PassThrough()
+      runFilePipeline(fileStream)
+      req.on('end', () => {
+        if (state !== 'receiving') return
+        state = 'committing'
+        void commit()
+      })
+      meter.pipe(fileStream)
+      req.pipe(meter)
+      return
+    }
+
+    let bb
+    try {
+      bb = Busboy({
+        headers: req.headers,
+        defParamCharset: 'utf8',
+        limits: {
+          fileSize: maxBytes,
+          files: 1,
+          fields: 10,
+          fieldSize: 64 * 1024,
+        },
+      })
+    } catch {
+      logReject(req, 'bad_multipart')
+      releaseOnce()
+      return rejectEarly(req, res, 400, { error: 'multipart 解析失败，请检查 Content-Type' })
+    }
+
+    bb.on('file', (name, stream, info) => {
+      if (name !== 'file') {
+        stream.resume()
+        return
+      }
+      if (!userFilename && info && info.filename) userFilename = info.filename
+      runFilePipeline(stream)
     })
 
     bb.on('field', (name, val) => {
@@ -531,11 +634,6 @@ export async function uploadHandler(req, res) {
     bb.on('filesLimit', () => abort(400, '一次只能上传一个文件', 'files_limit'))
     bb.on('fieldsLimit', () => abort(400, '字段数超出限制', 'fields_limit'))
     bb.on('error', () => abort(400, 'multipart 解析失败', 'multipart_error'))
-    req.on('error', () => abort(400, '连接中断', 'request_error'))
-
-    req.on('close', () => {
-      if (!req.complete && state === 'receiving') abort(499, '客户端已断开', 'client_closed')
-    })
 
     bb.on('close', () => {
       if (state !== 'receiving') return

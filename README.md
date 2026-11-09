@@ -14,8 +14,9 @@
 
 **上传**
 
-- multipart 流式接收，单包上限默认 800MB，进程内存恒定 50–80MB（不随包大小涨）
+- 流式接收，单包上限默认 800MB，进程内存恒定 50–80MB（不随包大小涨）
 - 元数据（版本号 / 平台 / 架构）走 query，文件走 body，字段顺序无关
+- 两种 body 协议，按 `Content-Type` 分流：管理页用 `application/octet-stream`（body 即文件），CI 用 `multipart/form-data`。原因是部分运营商/企业网关会按 Content-Type 丢弃 multipart 上传体（2026-11-09 实测）
 - 同版本号重复上传回 409；并发同一版本只有一个能成功
 - 上传前做磁盘空间预检（按 1.1 倍预留），空间不足直接 507，不会传到一半炸
 - 客户端中途断线不杀进程，临时文件自动清理
@@ -178,7 +179,7 @@ npm run seed
 |---|---|---|
 | `GET` | `/healthz` | 健康检查（写盘探针，不鉴权） |
 | `GET` | `/api/releases` | 版本列表，支持 `status` / `platform` 筛选 |
-| `POST` | `/api/releases?version=&platform=&arch=` | 上传（multipart：`file` + `changelog`） |
+| `POST` | `/api/releases?version=&platform=&arch=` | 上传（两种：管理页裸流 `octet-stream`，CI 用 multipart `file` + `changelog`） |
 | `PATCH` | `/api/releases/:id` | 撤回 / 恢复（body `{"status":"yanked"\|"active"}`） |
 | `POST` | `/api/releases/:id/yank` | 撤回（等价写法） |
 | `POST` | `/api/releases/:id/unyank` | 恢复（等价写法） |

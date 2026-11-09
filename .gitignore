@@ -4,3 +4,5 @@ node_modules/
 data/
 .shots/
 *.log
+# docker save 出来的镜像包，125MB 一个，别进版本库
+online-exe-*.tar

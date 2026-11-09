@@ -250,9 +250,17 @@
       '&platform=' + encodeURIComponent(platform) +
       '&arch=' + encodeURIComponent(arch)
 
-    var fd = new FormData()
-    fd.append('changelog', changelog)
-    fd.append('file', selectedFile)
+    // 更新说明走请求头（裸流没有 multipart 字段）。HTTP 头只吃 ASCII，
+    // 所以 encodeURIComponent 后送，服务端 decodeURIComponent 解回。
+    var changelogHeader = ''
+    if (changelog) {
+      changelogHeader = encodeURIComponent(changelog)
+      // Node 默认整个请求头上限 16KB，留一半余量给其它头。
+      if (changelogHeader.length > 8000) {
+        fail('更新说明太长（' + changelog.length + ' 字），请精简到 800 字以内再传')
+        return
+      }
+    }
 
     uploading = true
     submitBtn.disabled = true
@@ -265,6 +273,14 @@
 
     var xhr = new XMLHttpRequest()
     xhr.open('POST', url, true)
+    // 刻意不用 FormData/multipart：部分运营商和企业的网关会按 Content-Type 丢弃上传体
+    // （实测同一文件、同一 URL：multipart 的 body 一个包都到不了服务器，octet-stream 正常）。
+    // 所以 body 直接就是文件本身，元数据全部走 query 和请求头。
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    try {
+      xhr.setRequestHeader('X-Filename', encodeURIComponent(selectedFile.name))
+    } catch (e1) { /* 头值非法就退回服务端默认文件名 */ }
+    if (changelogHeader) xhr.setRequestHeader('X-Changelog', changelogHeader)
 
     var startedAt = Date.now()
     xhr.upload.onprogress = function (ev) {
@@ -314,12 +330,12 @@
 
     xhr.onerror = function () {
       resetButton()
-      // 这里拿不到服务端的 JSON：多半是服务端提前拒绝后关了连接，响应被 RST 吞掉。
-      // 所以文案不能只说「网络中断」，得把最可能的原因和重试节奏说清楚。
-      fail('连接被中断，未收到服务器响应（临时文件已清理）。请确认该版本号是否已存在，或稍等约 2 分钟后重试')
+      // 这里拿不到任何服务端信息：连接被掐断时浏览器只给 onerror。
+      // 文案只说事实、不猜原因 —— 之前写成「版本号可能已存在」，把排查方向带偏了两小时。
+      fail('连接被中断，未收到服务端响应。这通常不是版本号冲突，而是上传通道（网络/网关/代理）把请求体截断了；可换网络重试，或到服务器上看 docker logs 里的 [upload] 日志确认。')
     }
 
-    xhr.send(fd)
+    xhr.send(selectedFile)
   })
 
   // 行操作：撤回 / 恢复 / 删除 / 重新上传

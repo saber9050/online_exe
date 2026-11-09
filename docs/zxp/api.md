@@ -14,7 +14,7 @@
 | 认证 | **没有账号体系**。`/admin` 与 `/api/*` 由 `ADMIN_ALLOW_CIDR` 做来源网段限制，空值 = 不限制 |
 | 字符集 | 请求与响应一律 UTF-8；上传中文文件名依赖 busboy `defParamCharset: 'utf8'` |
 | 时间 | 响应里的时间**全部是 UTC**（`2026-11-05T02:10:00.000Z`），页面按 `TZ` 转本地 |
-| 请求体 | 只有 `PATCH` 用 `application/json`；`POST /api/releases` 用 `multipart/form-data`；版本号/平台/架构**必须走 query** |
+| 请求体 | 只有 `PATCH` 用 `application/json`；`POST /api/releases` 支持 `multipart/form-data`（CI）和 `application/octet-stream`（管理页，body 即文件）；版本号/平台/架构**必须走 query** |
 | 相对路径 | 响应里的 `download_url` 是相对路径（`/dl/...`），调用方自己拼 host |
 | 错误格式 | 业务错误统一 `{ "error": "中文说明" }`；**例外见 §1.1** |
 
@@ -169,7 +169,31 @@ curl.exe -i http://127.0.0.1:8080/healthz
 
 构建机 / CI / 管理页共用同一个接口。**流式接收，进程内存恒定 50–80MB，与包大小无关。**
 
+接口按 `Content-Type` 分流，两条路落到同一套「校验 → 查重 → 占位 → 空间预检 → 落盘 → 提交」逻辑：
+
+| 协议 | 谁在用 | body 形态 |
+|---|---|---|
+| `multipart/form-data` | CI / 脚本 / `curl -F` | 文件在 `file` 字段，`changelog` 在另一字段 |
+| `application/octet-stream` | 管理页 | **body 就是文件本身**，文件名和 `changelog` 走请求头 |
+
+> 为什么留着两套：部分运营商/企业网关的 DPI 会按 `Content-Type` 丢弃上传体。
+> 2026-11-09 实测（同一 5MB 文件、同一出口、同一 URL，唯一变量是 Content-Type）：multipart 的 body 一个包都到不了服务器网卡，octet-stream 正常。管理页因此改走裸流，CI 的 `curl -F` 不受影响。
+
 ### 5.1 请求
+
+**裸流（管理页用，推荐）**
+
+```http
+POST /api/releases?version=1.3.0&platform=windows10&arch=x64
+Content-Type: application/octet-stream
+X-Filename: CoreRunner-1.3.0-win10-x64.exe
+X-Changelog: %E4%BF%AE%E5%A4%8D%E7%99%BB%E5%BD%95%E9%97%AA%E9%80%80%EF%BC%9B%E5%90%AF%E5%8A%A8%E9%80%9F%E5%BA%A6%E4%BC%98%E5%8C%96%2030%25
+Content-Length: 104857600
+
+<二进制>
+```
+
+**multipart（CI 兼容）**
 
 ```http
 POST /api/releases?version=1.3.0&platform=windows10&arch=x64
@@ -194,11 +218,14 @@ Content-Type: application/octet-stream
 | query | `version` | ✅ | 严格 semver `MAJOR.MINOR.PATCH[-prerelease]`，允许 `v` 前缀（服务端剥掉后入库） |
 | query | `platform` | ✅ | `windows7` / `windows10` / `macos` / `linux` |
 | query | `arch` | ✅ | `x64` / `arm64` / `ia32`，且必须落在 8 组白名单内 |
-| multipart | `file` | ✅ | **恰好一个**；超过 `MAX_UPLOAD_MB`（默认 800MB）→ 413 |
-| multipart | `changelog` | | 多行文本，无长度硬限制（`fieldSize` 上限 64KB） |
-| header | `Content-Length` | 建议 | 有值时做空间预检；chunked 时跳过预检，靠写错误兜底 |
+| header | `Content-Type` | ✅ | 必须是 `multipart/form-data` 或 `application/octet-stream`，其余一律 `400` |
+| multipart | `file` | ✅ | **恰好一个**；超过 `MAX_UPLOAD_MB`（默认 800MB）→ `413` |
+| multipart | `changelog` | | 多行文本，`fieldSize` 上限 64KB |
+| header | `X-Filename` | | 裸流专用；**必须 `encodeURIComponent`**（HTTP 头只吃 ASCII）。缺省为 `package-<version>-<platform>-<arch>.bin` |
+| header | `X-Changelog` | | 裸流专用；同样要 `encodeURIComponent`。整个请求头上限 16KB，管理页限制在编码后 8000 字符内 |
+| header | `Content-Length` | 建议 | 有值时做空间预检 + 裸流的单包上限预检；chunked 时跳过预检，靠写入期计数兜底（超限同样 `413`，不会写脏盘） |
 
-**为什么元数据必须走 query**：multipart 的 part 按客户端发送顺序到达。`file` 先到时服务端还不知道版本和平台，就没法算唯一键、没法查重、没法定临时文件路径。query 在请求行里，**一定先于 body 到达**，所以「校验 → 查重 → 占位 → 空间预检」全部在收第一个字节之前完成。
+**为什么元数据必须走 query**：body 是流式的，服务端在收到第一个字节前就要知道唯一键和临时文件路径。query 在请求行里，**一定先于 body 到达**，所以「校验 → 查重 → 占位 → 空间预检」全部能在收第一个字节之前完成。裸流协议下这条更重要——body 里除了文件字节没有任何结构可解析。
 
 字段顺序无关：`-F "file=@a" -F "changelog=x"`（文件在前）同样成功。
 
@@ -252,7 +279,8 @@ Body 是一条 Release DTO（**不含** `downloads`）：
 |---|---|---|
 | `400` | `版本号格式不合法，应为 MAJOR.MINOR.PATCH[-prerelease]` | `version` 缺失 / 非法 |
 | `400` | `平台与架构组合不受支持：<platform>-<arch>` | 不在 8 组白名单 |
-| `400` | `multipart 解析失败，请检查 Content-Type` | Content-Type 不是 multipart |
+| `400` | `Content-Type 必须是 multipart/form-data（file 字段）或 application/octet-stream（body 即文件）` | 两种协议都不是 |
+| `400` | `multipart 解析失败，请检查 Content-Type` | 声明了 multipart 但结构坏了 |
 | `400` | `一次只能上传一个文件` | 两个 `file` part |
 | `400` | `字段数超出限制` | field 数 > 10 |
 | `400` | `请求中没有文件，请用 file 字段上传` | 没有 `file` part |
