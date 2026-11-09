@@ -109,6 +109,7 @@ async function main() {
   const dataA = path.join(tmpRoot, 'data-a') // 主用例
   const dataB = path.join(tmpRoot, 'data-b') // 上传上限用例
   const dataC = path.join(tmpRoot, 'data-c') // CIDR 用例
+  const dataD = path.join(tmpRoot, 'data-d') // 分片上传用例
 
   console.log(`临时数据目录：${tmpRoot}\n`)
 
@@ -519,6 +520,111 @@ async function main() {
   check('/healthz 不受 CIDR 限制（否则容器会被标 unhealthy）', healthStillOk.status === 200)
 
   await C.stop()
+
+  // ════════════════════════════════════════════════════════════════
+  // 场景八：分片上传（管理页走的线路）
+  // ════════════════════════════════════════════════════════════════
+  console.log('\n[场景八] 分片上传')
+
+  const D = startServer({ dataDir: dataD, port: 19084, env: { MAX_UPLOAD_MB: '64' } })
+  await waitReady(D.url)
+
+  const cbytes = makeBytes(21 * 1024 * 1024 + 11, 'c') // 21MB → 8+8+5 三片
+  const cwant = sha256(cbytes)
+  const cqs = new URLSearchParams({
+    version: '2.0.0',
+    platform: 'linux',
+    arch: 'x64',
+    total: String(cbytes.length),
+  }).toString()
+
+  const init = await req(D.url, `/api/uploads?${cqs}`, {
+    method: 'POST',
+    headers: {
+      'X-Filename': encodeURIComponent('分片包.bin'),
+      'X-Changelog': encodeURIComponent('第一行\n第二行'),
+    },
+  })
+  check('init → 201', init.status === 201, JSON.stringify(init.body))
+  const { id, chunkSize, chunks } = init.body || {}
+
+  const badLen = await req(D.url, `/api/uploads/${id}/chunks?offset=${chunkSize}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: new Uint8Array(cbytes.subarray(chunkSize, chunkSize + 10)),
+  })
+  check('分片长度不符 → 400', badLen.status === 400, badLen.text.slice(0, 60))
+
+  const badOff = await req(D.url, `/api/uploads/${id}/chunks?offset=7`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: new Uint8Array(10),
+  })
+  check('offset 不对齐 → 400', badOff.status === 400)
+
+  const earlyDone = await req(D.url, `/api/uploads/${id}/complete`, { method: 'POST' })
+  check('分片不全时 complete → 400', earlyDone.status === 400, earlyDone.text.slice(0, 60))
+
+  // 故意倒序并发发片：定位写（r+ + start）写错了顺序就会拼错
+  const order = [...Array(chunks).keys()].reverse()
+  const pushed = await Promise.all(
+    order.map((i) => {
+      const start = i * chunkSize
+      const end = Math.min(start + chunkSize, cbytes.length)
+      return req(D.url, `/api/uploads/${id}/chunks?offset=${start}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: new Uint8Array(cbytes.subarray(start, end)),
+      })
+    }),
+  )
+  check('乱序并发推分片全成功', pushed.every((r) => r.status === 200), pushed.map((r) => r.status).join(','))
+
+  const dupChunk = await req(D.url, `/api/uploads/${id}/chunks?offset=0`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: new Uint8Array(cbytes.subarray(0, Math.min(chunkSize, cbytes.length))),
+  })
+  check('重复分片幂等（duplicate:true）', dupChunk.status === 200 && dupChunk.body?.duplicate === true)
+
+  const done = await req(D.url, `/api/uploads/${id}/complete`, { method: 'POST' })
+  check('complete → 201', done.status === 201, JSON.stringify(done.body).slice(0, 120))
+  check('分片拼出来的 sha256 与源一致', done.body?.sha256 === cwant, `${done.body?.sha256} vs ${cwant}`)
+  check('size 等于源长度', done.body?.size === cbytes.length)
+  check('中文文件名解对', done.body?.filename === '分片包.bin', String(done.body?.filename))
+  check('多行 changelog 解对', done.body?.changelog === '第一行\n第二行', JSON.stringify(done.body?.changelog))
+  check('提交后查会话 → 410', (await req(D.url, `/api/uploads/${id}`)).status === 410)
+
+  const dupInit = await req(D.url, `/api/uploads?${cqs}`, { method: 'POST' })
+  check('同版本再 init → 409 且带 existing', dupInit.status === 409 && Boolean(dupInit.body?.existing))
+
+  const s2qs = new URLSearchParams({
+    version: '3.0.0',
+    platform: 'linux',
+    arch: 'x64',
+    total: '1000',
+  }).toString()
+  const s2 = await req(D.url, `/api/uploads?${s2qs}`, { method: 'POST' })
+  const aborted = await req(D.url, `/api/uploads/${s2.body.id}`, { method: 'DELETE' })
+  check('abort → 204', aborted.status === 204)
+  check('abort 后会话 410', (await req(D.url, `/api/uploads/${s2.body.id}`)).status === 410)
+  const abortTmp = (
+    await fs.readdir(path.join(dataD, 'releases', '3.0.0', 'linux-x64')).catch(() => [])
+  ).filter((f) => f.endsWith('.tmp'))
+  check('abort 后没有残留 .tmp', abortTmp.length === 0, abortTmp.join(','))
+
+  const bigTot = new URLSearchParams({
+    version: '4.0.0',
+    platform: 'linux',
+    arch: 'x64',
+    total: String(200 * 1024 * 1024),
+  }).toString()
+  check('total 超上限 → 413', (await req(D.url, `/api/uploads?${bigTot}`, { method: 'POST' })).status === 413)
+
+  check('分片全流程后进程仍健康', (await req(D.url, '/healthz')).status === 200)
+  check('日志里没有 UnhandledPromiseRejection', !D.logs.join('').includes('UnhandledPromiseRejection'))
+
+  await D.stop()
 
   // ════════════════════════════════════════════════════════════════
   // 收尾

@@ -209,6 +209,20 @@
     return false
   }
 
+  // ── 分片上传 ──────────────────────────────────────────────────────
+  // 为什么分片：单连接在乱序严重的链路上会被 TCP 自己压到 400KB/s（实测 21% 报文乱序，
+  // 每 5 个包里就有 1 个到晚了，发送端当成丢包处理、拥塞窗口反复减半）。
+  // 切成 8MB 的片、6 条连接并发，每条连接有自己的拥塞窗口，单条被打下去不影响其它条；
+  // 顺带每片独立重试 —— 断哪片补哪片，不用整包重来。
+
+  var CHUNK_SIZE = 8 * 1024 * 1024
+
+  // 6 是浏览器对同源的 HTTP/1.1 并发上限，设更高只会排队
+  var CONCURRENCY = 6
+
+  // 单片最多重试次数（不含首次）
+  var MAX_RETRY = 3
+
   // 提交上传
   form.addEventListener('submit', function (e) {
     e.preventDefault()
@@ -246,21 +260,40 @@
       return
     }
 
-    var url = '/api/releases?version=' + encodeURIComponent(version) +
-      '&platform=' + encodeURIComponent(platform) +
-      '&arch=' + encodeURIComponent(arch)
-
-    // 更新说明走请求头（裸流没有 multipart 字段）。HTTP 头只吃 ASCII，
-    // 所以 encodeURIComponent 后送，服务端 decodeURIComponent 解回。
+    // 更新说明走请求头。HTTP 头只吃 ASCII，所以 encodeURIComponent 后送，
+    // 服务端 decodeURIComponent 解回。Node 默认整个请求头上限 16KB，留一半余量。
     var changelogHeader = ''
     if (changelog) {
       changelogHeader = encodeURIComponent(changelog)
-      // Node 默认整个请求头上限 16KB，留一半余量给其它头。
       if (changelogHeader.length > 8000) {
         fail('更新说明太长（' + changelog.length + ' 字），请精简到 800 字以内再传')
         return
       }
     }
+
+    startChunkedUpload({
+      version: version,
+      platform: platform,
+      arch: arch,
+      changelogHeader: changelogHeader,
+      file: selectedFile
+    })
+  })
+
+  function startChunkedUpload(opts) {
+    var file = opts.file
+    var total = file.size
+    var id = ''
+    var chunkSize = CHUNK_SIZE
+    var chunks = 0
+    var nextIndex = 0
+    var active = 0
+    var okChunks = 0
+    var completedBytes = 0
+    var loaded = {}        // index -> 该片已发出字节（只用于进度显示）
+    var startedAt = 0
+    var finished = false
+    var renderTimer = null
 
     uploading = true
     submitBtn.disabled = true
@@ -269,74 +302,200 @@
     formTip.textContent = ''
     progressWrap.classList.add('show')
     progressBar.style.width = '0%'
-    uploadMeta.textContent = '准备上传 ' + fmtBytes(selectedFile.size)
+    uploadMeta.textContent = '正在建立上传会话…'
+    startedAt = Date.now()
 
-    var xhr = new XMLHttpRequest()
-    xhr.open('POST', url, true)
-    // 刻意不用 FormData/multipart：部分运营商和企业的网关会按 Content-Type 丢弃上传体
-    // （实测同一文件、同一 URL：multipart 的 body 一个包都到不了服务器，octet-stream 正常）。
-    // 所以 body 直接就是文件本身，元数据全部走 query 和请求头。
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-    try {
-      xhr.setRequestHeader('X-Filename', encodeURIComponent(selectedFile.name))
-    } catch (e1) { /* 头值非法就退回服务端默认文件名 */ }
-    if (changelogHeader) xhr.setRequestHeader('X-Changelog', changelogHeader)
+    function scheduleRender() {
+      if (renderTimer) return
+      renderTimer = setTimeout(function () { renderTimer = null; render() }, 200)
+    }
 
-    var startedAt = Date.now()
-    xhr.upload.onprogress = function (ev) {
-      if (!ev.lengthComputable) return
-      var pct = ev.loaded / ev.total * 100
+    function render() {
+      var inflight = 0
+      for (var k in loaded) inflight += loaded[k]
+      var done = Math.min(total, completedBytes + inflight)
+      var pct = total > 0 ? done / total * 100 : 0
       progressBar.style.width = pct.toFixed(1) + '%'
       var sec = (Date.now() - startedAt) / 1000
-      var speed = sec > 0 ? ev.loaded / sec : 0
+      var speed = sec > 0 ? done / sec : 0
       uploadMeta.textContent = pct.toFixed(1) + '% · ' +
-        fmtBytes(ev.loaded) + ' / ' + fmtBytes(ev.total) + ' · ' +
-        fmtBytes(speed) + '/s'
+        fmtBytes(done) + ' / ' + fmtBytes(total) + ' · ' +
+        fmtBytes(speed) + '/s · 分片 ' + okChunks + '/' + chunks
     }
 
-    xhr.onload = function () {
+    function finishWithError(msg, body) {
+      if (finished) return
+      finished = true
       resetButton()
-      var data = {}
-      try { data = JSON.parse(xhr.responseText || '{}') } catch (e2) { /* ignore */ }
-
-      if (xhr.status === 201) {
-        progressBar.style.width = '100%'
-        uploadMeta.textContent = '上传成功 · sha256 ' + String(data.sha256 || '').slice(0, 8)
-        formTip.className = 'form-tip ok'
-        formTip.textContent = '已发布 ' + data.version + ' / ' + data.platform + ' / ' + data.arch
-        setFile(null)
-        fFile.value = ''
-        try { sessionStorage.setItem('online-exe-flash', data.id || '') } catch (e3) { /* ignore */ }
-        setTimeout(function () { location.reload() }, 900)
-        return
-      }
-
-      if (xhr.status === 409 && data && data.error) {
-        fail(data.error)
-        if (data.existing && data.existing.version) {
-          var next = bumpPatch(data.existing.version)
-          if (next) {
-            fVersion.value = next
-            saveMem()
-            updateCoverage()
-            formTip.textContent = data.error + '，已自动改为 ' + next
-          }
+      if (!msg) msg = '上传失败'
+      if (body && body.existing && body.existing.version) {
+        var next = bumpPatch(body.existing.version)
+        if (next) {
+          fVersion.value = next
+          saveMem()
+          updateCoverage()
+          msg = msg + '，已自动改为 ' + next
         }
-        return
+      }
+      fail(msg)
+    }
+
+    function giveUp(msg) {
+      if (finished) return
+      // 主动把会话删掉，别让服务器上的 tmp 和占位挂到 10 分钟后被 GC
+      if (id) {
+        try { fetch('/api/uploads/' + encodeURIComponent(id), { method: 'DELETE' }) } catch (e) { /* ignore */ }
+      }
+      finishWithError(msg)
+    }
+
+    function onUploaded(data) {
+      finished = true
+      resetButton()
+      progressBar.style.width = '100%'
+      uploadMeta.textContent = '上传成功 · sha256 ' + String(data.sha256 || '').slice(0, 8)
+      formTip.className = 'form-tip ok'
+      formTip.textContent = '已发布 ' + data.version + ' / ' + data.platform + ' / ' + data.arch
+      setFile(null)
+      fFile.value = ''
+      try { sessionStorage.setItem('online-exe-flash', data.id || '') } catch (e) { /* ignore */ }
+      setTimeout(function () { location.reload() }, 900)
+    }
+
+    function postJson(url, body) {
+      return fetch(url, { method: 'POST', body: body }).then(function (r) {
+        return r.text().then(function (t) {
+          var data = {}
+          try { data = JSON.parse(t || '{}') } catch (e) { /* 非 JSON 就当空 */ }
+          return { ok: r.ok, status: r.status, data: data }
+        })
+      })
+    }
+
+    // ① 建会话：服务端在这里做查重、占位、磁盘预检，并预建好 tmp 文件
+    var initUrl = '/api/uploads?version=' + encodeURIComponent(opts.version) +
+      '&platform=' + encodeURIComponent(opts.platform) +
+      '&arch=' + encodeURIComponent(opts.arch) +
+      '&total=' + total
+
+    var initHeaders = {}
+    try {
+      initHeaders['X-Filename'] = encodeURIComponent(file.name)
+    } catch (e) { /* 头值非法就退回服务端默认文件名 */ }
+    if (opts.changelogHeader) initHeaders['X-Changelog'] = opts.changelogHeader
+
+    fetch(initUrl, { method: 'POST', headers: initHeaders })
+      .then(function (r) {
+        return r.text().then(function (t) {
+          var data = {}
+          try { data = JSON.parse(t || '{}') } catch (e) { /* ignore */ }
+          if (!r.ok) {
+            finishWithError(data.error || ('无法建立上传会话（HTTP ' + r.status + '）'), data)
+            return
+          }
+          id = data.id
+          chunkSize = data.chunkSize || CHUNK_SIZE
+          chunks = data.chunks
+          pump()
+        })
+      })
+      .catch(function () {
+        finishWithError('无法建立上传会话：连接被中断')
+      })
+
+    // ② 并发推分片：保持 CONCURRENCY 个在飞，谁先回来谁补下一个
+    function pump() {
+      if (finished) return
+      while (active < CONCURRENCY && nextIndex < chunks) {
+        sendChunk(nextIndex)
+        nextIndex += 1
+      }
+      if (okChunks === chunks && chunks > 0) commit()
+    }
+
+    function sendChunk(index) {
+      var start = index * chunkSize
+      var end = Math.min(start + chunkSize, total)
+      var size = end - start
+      var attempt = 0
+      active += 1
+      loaded[index] = 0
+
+      function retry(why) {
+        attempt += 1
+        loaded[index] = 0
+        if (attempt <= MAX_RETRY && !finished) {
+          setTimeout(go, 400 * attempt)
+          return
+        }
+        active -= 1
+        giveUp('第 ' + (index + 1) + ' 片重试 ' + MAX_RETRY + ' 次仍失败（' + why + '）。已上传 ' +
+          okChunks + '/' + chunks + ' 片，重试会重新开始；可换网络后再试。')
       }
 
-      fail((data && data.error) || ('上传失败（HTTP ' + xhr.status + '）'))
+      function go() {
+        if (finished) return
+        var xhr = new XMLHttpRequest()
+        xhr.open('PUT', '/api/uploads/' + encodeURIComponent(id) + '/chunks?offset=' + start, true)
+        // 与单包上传同一个理由：刻意不用 multipart，链路会按 Content-Type 丢包
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+        xhr.upload.onprogress = function (ev) {
+          if (!ev.lengthComputable) return
+          loaded[index] = ev.loaded
+          scheduleRender()
+        }
+        xhr.onload = function () {
+          if (finished) return
+          if (xhr.status >= 200 && xhr.status < 300) {
+            active -= 1
+            okChunks += 1
+            completedBytes += size
+            delete loaded[index]
+            scheduleRender()
+            pump()
+            return
+          }
+          var msg = ''
+          try { msg = (JSON.parse(xhr.responseText || '{}').error) || '' } catch (e2) { /* ignore */ }
+          // 410 = 会话被回收（服务重启 / 闲置超时），重试也没用
+          if (xhr.status === 410) {
+            active -= 1
+            giveUp(msg || '上传会话已过期，请重新上传')
+            return
+          }
+          retry(msg || ('HTTP ' + xhr.status))
+        }
+        xhr.onerror = function () { retry('连接中断') }
+        xhr.onabort = function () { retry('请求被中止') }
+        try {
+          xhr.send(file.slice(start, end))
+        } catch (e3) {
+          retry('切片失败')
+        }
+      }
+
+      go()
     }
 
-    xhr.onerror = function () {
-      resetButton()
-      // 这里拿不到任何服务端信息：连接被掐断时浏览器只给 onerror。
-      // 文案只说事实、不猜原因 —— 之前写成「版本号可能已存在」，把排查方向带偏了两小时。
-      fail('连接被中断，未收到服务端响应。这通常不是版本号冲突，而是上传通道（网络/网关/代理）把请求体截断了；可换网络重试，或到服务器上看 docker logs 里的 [upload] 日志确认。')
+    // ③ 让服务端做 fsync + sha256 + 落记录
+    function commit() {
+      if (finished) return
+      if (renderTimer) { clearTimeout(renderTimer); renderTimer = null }
+      progressBar.style.width = '100%'
+      uploadMeta.textContent = '分片已传完，正在校验并提交…'
+      postJson('/api/uploads/' + encodeURIComponent(id) + '/complete')
+        .then(function (res) {
+          if (res.status === 201) {
+            onUploaded(res.data)
+            return
+          }
+          finishWithError(res.data.error || ('提交失败（HTTP ' + res.status + '）'), res.data)
+        })
+        .catch(function () {
+          finishWithError('提交失败：连接中断。分片已保留在服务器，但刷新页面后需要重新上传。')
+        })
     }
-
-    xhr.send(selectedFile)
-  })
+  }
 
   // 行操作：撤回 / 恢复 / 删除 / 重新上传
   function closestAction(node) {

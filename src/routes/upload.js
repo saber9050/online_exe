@@ -12,23 +12,22 @@
 import Busboy from 'busboy'
 import { pipeline } from 'node:stream/promises'
 import { PassThrough, Transform } from 'node:stream'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
 import { cfg } from '../config.js'
 import { catalog } from '../catalog/catalog.js'
 import { storage } from '../storage/storage.js'
 import { enqueueWrite, writeAtomic, serialize } from '../catalog/persist.js'
+import { getFreeBytes, tryReserve, releaseReserve, getReservedBytes } from '../storage/reserve.js'
 import { parseVersion } from '../semver.js'
 import { PLATFORM_ARCH_SET } from '../constants.js'
 import { toReleaseDto } from './dto.js'
+import { buildRecord, isVersionTaken, newId } from './record.js'
+import { clientIp, headerText, maxUploadBytes } from './http-helpers.js'
 
 /** 正在上传的版本占位：key → 开始时间。导出供优雅退出等待。 */
 export const inflight = new Map()
-
-let reservedBytes = 0
-let freeCacheAt = 0
-let freeCacheBytes = 0
 
 // 每 5 分钟清理超过 30 分钟未提交的占位（客户端拔网线跑路时兜底）
 const cleanupTimer = setInterval(() => {
@@ -41,11 +40,6 @@ const cleanupTimer = setInterval(() => {
   }
 }, 5 * 60 * 1000)
 cleanupTimer.unref?.()
-
-function clientIp(req) {
-  const raw = req.socket?.remoteAddress || req.ip || req.headers['x-forwarded-for'] || ''
-  return String(Array.isArray(raw) ? raw[0] : raw).replace(/^::ffff:/, '')
-}
 
 /** 上传途中连续多久收不到数据就判定客户端已跑路。默认无限等会把连接、占位、临时文件一起挂死。 */
 const UPLOAD_IDLE_MS = 120 * 1000
@@ -85,50 +79,6 @@ function logStage(req, stage, detail) {
   }))
 }
 
-function newId() {
-  // 20261105T021000-1f3a9c7e
-  const ts = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '')
-  return `${ts}-${randomBytes(4).toString('hex')}`
-}
-
-/**
- * 从请求头取文本。
- *
- * HTTP 头只能是 ASCII（非 ASCII 会被浏览器直接抛 TypeError），
- * 所以 changelog / filename 由前端 encodeURIComponent 后放进来，这里解回来。
- * 解不开就当原样 —— 猜测编码比丢掉信息更难排查。
- * @param {import('express').Request} req
- * @param {string} name 小写头名
- */
-function headerText(req, name) {
-  const raw = req.headers[name]
-  if (typeof raw !== 'string' || raw === '') return ''
-  try {
-    return decodeURIComponent(raw)
-  } catch {
-    return raw
-  }
-}
-
-async function getFreeBytes() {
-  const now = Date.now()
-  if (now - freeCacheAt < 5000) return freeCacheBytes
-  freeCacheBytes = await storage.freeBytes()
-  freeCacheAt = now
-  return freeCacheBytes
-}
-
-function tryReserve(free, contentLength) {
-  const need = Math.ceil(contentLength * 1.1)
-  if (free - reservedBytes < need) return 0
-  reservedBytes += need
-  return need
-}
-
-function releaseReserve(need) {
-  if (need > 0) reservedBytes = Math.max(0, reservedBytes - need)
-}
-
 /** 给可能永久挂住的系统调用加超时：占位不能等一个再也不返回的 promise。 */
 function withTimeout(promise, ms, label) {
   let timer = null
@@ -163,51 +113,6 @@ function rejectEarly(req, res, code, body) {
   req.on('close', done)
 }
 
-/**
- * 同一个版本号还能不能再传。
- *
- * 只有「这条记录还在用」时才拦，两种状态放行：
- *   ① file_missing === true —— 记录在、文件丢了，允许补齐（沿用原 id，下载计数不归零）
- *   ② status === 'deleted'  —— 墓碑。删除的语义是「这个版本作废、东西没了」，
- *      既然文件已经删了，就不该再拿它挡住重新发布；否则用户只能改版本号来绕，
- *      而他要发的本来就是同一个版本。
- *
- * 在架（active）和已撤回（yanked）仍然一律 409：这两种状态下文件还在，
- * 覆盖等于「同一个 URL 换内容」，客户端缓存和版本追溯都会失效。
- *
- * @param {any} rec
- * @returns {boolean} true = 已被占用，拒绝上传
- */
-function isVersionTaken(rec) {
-  if (!rec) return false
-  if (rec.file_missing === true) return false
-  if (rec.status === 'deleted') return false
-  return true
-}
-
-function buildRecord({ id, parsed, platform, arch, filename, size, sha256, changelog, ip }) {
-  return {
-    id,
-    version: parsed.version,
-    major: parsed.major,
-    minor: parsed.minor,
-    patch: parsed.patch,
-    prerelease: parsed.prerelease,
-    is_prerelease: parsed.is_prerelease,
-    platform,
-    arch,
-    filename,
-    object_key: `${parsed.version}/${platform}-${arch}/package.bin`,
-    size,
-    sha256,
-    changelog,
-    status: 'active',
-    file_missing: false,
-    uploaded_at: new Date().toISOString(),
-    uploaded_ip: ip,
-  }
-}
-
 /** @param {import('express').Request} req @param {import('express').Response} res */
 export async function uploadHandler(req, res) {
   // 先定协议，再谈别的：不认识的 Content-Type 直接拒，别把一段 JSON 当安装包写进磁盘。
@@ -226,7 +131,7 @@ export async function uploadHandler(req, res) {
   const parsed = parseVersion(req.query.version)
   const platform = String(req.query.platform || '')
   const arch = String(req.query.arch || '')
-  const maxBytes = cfg.maxUploadMb * 1024 * 1024
+  const maxBytes = maxUploadBytes()
 
   if (!parsed) {
     logReject(req, 'bad_version')
@@ -504,7 +409,7 @@ export async function uploadHandler(req, res) {
       }
       reserved = tryReserve(free, contentLength)
       if (reserved === 0) {
-        logReject(req, 'no_space', { free, reservedBytes })
+        logReject(req, 'no_space', { free, reservedBytes: getReservedBytes() })
         releaseOnce()
         return rejectEarly(req, res, 507, { error: '磁盘空间不足，无法接收该文件' })
       }

@@ -61,6 +61,11 @@
 | 7 | `POST` | `/api/releases/:id/unyank` | 恢复（冻结表形态，与 #4 等价） | CIDR | ✅ |
 | 8 | `GET` | `/api/orphans` | 列出孤儿文件 | CIDR | ✅ |
 | 9 | `DELETE` | `/api/orphans` | 清空孤儿目录（带 `?path=` 则删单个） | CIDR | ✅ |
+| 10 | `POST` | `/api/uploads` | 开分片上传会话（管理页用） | CIDR | ✅ |
+| 11 | `GET` | `/api/uploads/:id` | 查会话进度（哪些片没到） | CIDR | ✅ |
+| 12 | `PUT` | `/api/uploads/:id/chunks?offset=` | 传一片 | CIDR | ✅ |
+| 13 | `POST` | `/api/uploads/:id/complete` | 校验并提交 | CIDR | ✅ |
+| 14 | `DELETE` | `/api/uploads/:id` | 放弃会话，清 tmp | CIDR | ✅ |
 
 ---
 
@@ -316,6 +321,52 @@ curl.exe --progress-bar -X POST "http://10.20.3.10:8080/api/releases?version=1.4
 ```
 
 CI 里跑的是 Linux，用 sh 版（见 §12）。
+
+### 5.7 分片上传（`/api/uploads`）——管理页走这条
+
+**为什么存在**：单连接传 400MB，在乱序严重的链路上会被 TCP 自己压到 400KB/s
+（实测 `rcv_ooopack` ≈ 21%，每 5 个包里 1 个到晚了，发送端当成丢包处理、拥塞窗口反复减半）。
+拆成 8MB 分片、6 条连接并发，每条连接有独立拥塞窗口，单条被打下去不影响其它条；
+顺带每片独立重试 —— 断哪片补哪片，不用整包重来。
+
+`POST /api/releases` 保持原样，CI / 脚本继续用；管理页改走这套。
+
+**流程**
+
+```
+① POST   /api/uploads?version=&platform=&arch=&total=[&chunkSize=]
+   → 201 { id, chunkSize, chunks, total }
+   服务端在这里做完 查重 / 占位 / 磁盘预检 / 建目录 / 预建 tmp（truncate 到 total）
+
+② PUT    /api/uploads/:id/chunks?offset=<片起始字节>
+   Content-Type: application/octet-stream
+   Content-Length 必须严格等于 min(chunkSize, total - offset)
+   → 200 { received, chunks }（重复传同一片返回 duplicate:true，幂等）
+
+③ POST   /api/uploads/:id/complete
+   → 201 + 版本记录 DTO（服务端 fsync + 整读算 sha256 + 落 releases.json）
+
+失败/放弃  DELETE /api/uploads/:id → 204（立刻清 tmp 和占位，不用等 GC）
+断线重连  GET    /api/uploads/:id → { received, chunks, missing:[...], expiresInMs }
+```
+
+**关键约束**
+
+| 项 | 说明 |
+|---|---|
+| `offset` | 必须是 `chunkSize` 的整数倍且 `< total`，否则 `400` |
+| 分片长度 | 必须严格等于 `min(chunkSize, total - offset)`，短一个字节都 `400` |
+| 并发 | 同一片并发重试 → `409`；不同片随便并发，服务端各开各的 fd 定位写 |
+| 会话存活 | 内存态，闲置 10 分钟被 GC，进程重启即失效。客户端拿到 `410` 就重新 init |
+| 提交前置 | 所有分片到齐才允许 `complete`，否则 `400` 并告诉你还差几片 |
+| 提交失败 | 会话退回 `open`，可以直接重试 `complete`，**不用重传分片** |
+| 唯一键 | 与 `POST /api/releases` 共用同一套查重与 `inflight` 占位，两条路不会互相踩 |
+
+**为什么 tmp 要 `truncate(total)` 预分配**：分片是乱序定位写，不预分配的话最后一片之前是一片空洞，
+`stat.size` 会小于 `total`，提交时的长度校验会误判。
+
+**sha256 为什么在最后算**：分片乱序到达，没法边传边累加，只能 commit 时整读一遍。
+400MB 在 2C 的 ECS 上约 2 秒，一次的事情，不影响上传速度。
 
 ---
 
