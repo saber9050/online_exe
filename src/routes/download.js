@@ -18,8 +18,9 @@ export async function downloadHandler(req, res, next) {
   const rel = catalog.find(req.params.version, platform, arch)
   if (!rel) return res.status(404).send('not found')
 
-  // 墓碑不是「文件缺失」，直接 404
-  if (rel.status === 'deleted') return res.status(404).send('not found')
+  // 只有 active 能下：墓碑（deleted）是版本号作废，已撤回（yanked）是发版人主动下架，
+  // 两者都不该再被下载到。统一回 404 而不是 410，避免通过错误码反推出「这个版本存在过」。
+  if (rel.status !== 'active') return res.status(404).send('not found')
 
   const abs = storage.abs(rel.object_key)
   const exists = await fs.stat(abs).catch(() => null)

@@ -114,11 +114,10 @@
         </thead>
         <tbody>
           <% history.forEach(function(r){ %>
-          <tr class="<%= r.status === 'yanked' ? 'row-yanked' : '' %>">
+          <tr>
             <td>
               <b><%= r.version %></b>
               <% if (r.is_prerelease) { %><span class="badge badge-beta">Beta</span><% } %>
-              <% if (r.status === 'yanked') { %><span class="badge">已撤回</span><% } %>
             </td>
             <td><%= r.platformLabel %><span class="dim"> · <%= r.archLabel %></span></td>
             <td><%= fmtSize(r.size) %></td>

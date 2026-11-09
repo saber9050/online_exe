@@ -550,7 +550,7 @@ function enqueueWrite(fn) {
 | **同版本号不覆盖** | 在架（`active`）与已撤回（`yanked`）的记录**重复上传一律 409**，不提供覆盖，传错了就发 `1.3.1`。两种例外放行：`file_missing === true`（补文件）、`status === 'deleted'`（删掉重发），见下 |
 | 排序 | `major → minor → patch` 降序，正式版优先于预发布 |
 | 预发布回落 | 某平台只有预发布版本时，`latest` 回落到最高的预发布并标 Beta |
-| 撤回 | `status='yanked'`，文件保留，列表灰显，直链仍可下 |
+| 撤回 | `status='yanked'`，文件保留，下载页不展示，直链 404 |
 | 删除 | `DELETE /api/releases/:id`，前端二次确认（弹框写明版本 + 平台 + 不可恢复）；**只删文件、记录改墓碑**；删除后同版本号**可以重新发布**，见下 |
 | 渠道 | **由 `is_prerelease` 表达**：`false` = stable，`true` = beta，没有独立字段 |
 
@@ -922,7 +922,7 @@ if (!PLATFORM_ARCH_SET.has(`${platform}-${arch}`)) return res.status(404).send('
 | 缓存 | `Cache-Control: public, no-cache` + 内容 sha256 做 ETag（每次回源校验，未变返回 304） |
 | 文件名 | `Content-Disposition: attachment; filename="<ASCII 回退>"; filename*=UTF-8''<encodeURIComponent>` |
 | 计数 | 内存累加，30s 落盘到 `stats.json`；**只在非 Range 请求或 Range 起点为 0 时 +1**，避免断点续传重复计数 |
-| 撤回版本 | `yanked` 仍可下载，保证老用户回滚不断链 |
+| 撤回版本 | `yanked` 不可下载（下载页隐藏 + 直链 404），避免下架版本继续被分发 |
 
 **`Content-Disposition` 必须同时给 ASCII 回退**。IE11 不支持 RFC 5987 的 `filename*`，只认 `filename="..."`；只写 `filename*` 的话，Win7 + IE11 下载出来的文件名会变成 URL 最后一段（`windows10-x64`）或者一段乱码。而下载页明确要求兼容 IE11，这是硬冲突。
 
@@ -1693,7 +1693,7 @@ host 模式的代价与对策：
 17. **挂载目录改只读**，`/healthz` 返回 503，`docker ps` 显示 unhealthy
 18. 下载中断后续传成功（浏览器暂停/恢复，或 `curl -C -`）
 19. **同一 URL 二次下载**返回 304 或命中缓存，服务端不再传输正文
-20. 撤回版本后下载页列表灰显，直链仍可下载
+20. 撤回版本后下载页列表不再出现该版本，直链返回 404
 21. `docker rm -f` 后重新 `up -d`，版本记录与文件都在
 22. 宿主机重启后容器自动拉起
 23. 页面时间与宿主机时间一致（时区没歪）

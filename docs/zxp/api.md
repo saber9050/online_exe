@@ -393,7 +393,7 @@ CI 里跑的是 Linux，用 sh 版（见 §12）。
 | 鉴权 | CIDR |
 | Content-Type | `application/json` |
 | Body | `{ "status": "active" \| "yanked" }` |
-| 撤回 | `{"status":"yanked"}` — 文件保留，下载页灰显，**直链仍可下** |
+| 撤回 | `{"status":"yanked"}` — 文件保留，下载页不展示，**直链 404**，可恢复 |
 | 恢复 | `{"status":"active"}` — 要求文件在 |
 
 ### 6.1 成功 `200`
@@ -583,7 +583,7 @@ curl.exe -s -X DELETE http://127.0.0.1:8080/api/orphans
 | 值 | 含义 | 下载页 | 列表默认 | `latest()` |
 |---|---|---|---|---|
 | `active` | 在架 | 显示 | 显示 | 参与 |
-| `yanked` | 已撤回（文件保留） | 灰显折叠，直链可下 | 显示 | 排除 |
+| `yanked` | 已撤回（文件保留） | **完全不显示** | 显示 | 排除 |
 | `deleted` | 墓碑（文件已删） | **完全不显示** | 排除 | 排除 |
 
 `file_missing = true` 与上面三态**互相独立**：一个 `yanked` 记录也可能缺文件。UI 上两个标记各自渲染。

@@ -107,8 +107,6 @@
 .tab-count { margin-left: 6px; font-size: 12px; color: #8a93a6; }
 .tab.is-active .tab-count { color: #dbe5fb; }
 
-.row-yanked td { color: #a0a8b8; }
-
 /* UA 自动定位到当前平台区块时给一点视觉提示 */
 .ua-target { border-color: #b9ccf5; box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.08); }
 .ua-sub .subgroup-head h3 { color: #2f6fed; }

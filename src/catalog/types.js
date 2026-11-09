@@ -9,7 +9,7 @@
  * 版本状态，表示「发版人的意图」。
  * 文件是否还在磁盘上由 {@link Release.file_missing} 单独表达，两者正交。
  * - `active`  在架
- * - `yanked`  已撤回（文件保留，直链仍可下）
+ * - `yanked`  已撤回（文件保留，但下载页不展示、直链 404；可恢复为 active）
  * - `deleted` 墓碑（文件已删、记录保留，版本号作废）
  * @typedef {'active'|'yanked'|'deleted'} ReleaseStatus
  */

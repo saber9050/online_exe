@@ -279,8 +279,17 @@ async function main() {
   const yankedList = await req(A.url, '/api/releases?status=yanked')
   check('status=yanked 能查到', yankedList.body.releases.some((r) => r.id === id1))
 
+  // 撤回必须真的下不到：只在列表里灰显而直链还能下，等于没下架
+  const dlYanked = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
+  check('已撤回版本直链 → 404', dlYanked.status === 404, String(dlYanked.status))
+  const pageYanked = await (await fetch(`${A.url}/`)).text()
+  check('已撤回版本不出现在下载页版本历史', !pageYanked.includes('/dl/1.3.0/windows10-x64'))
+
   const unyank = await req(A.url, `/api/releases/${id1}/unyank`, { method: 'POST' })
   check('POST /:id/unyank → 200 且 status=active', unyank.status === 200 && unyank.body?.status === 'active')
+
+  const dlBack = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
+  check('恢复后直链又能下载 → 200', dlBack.status === 200, String(dlBack.status))
 
   // PATCH 形态与别名等价
   const patch = await req(A.url, `/api/releases/${id1}`, {
