@@ -191,6 +191,24 @@
     if (f) setFile(f)
   })
 
+  /**
+   * 该「版本 + 平台 + 架构」是否已被占用。判据与后端 upload.js 的 isVersionTaken 一致：
+   * 墓碑（deleted）和缺文件（file_missing）放行，其余在架/已撤回都算占用。
+   * 直接读列表 DOM，所以撤回、恢复、删除这些行内操作之后仍然是准的。
+   */
+  function isTaken(version, platform, arch) {
+    var rows = allRows()
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-version') !== version) continue
+      if (rows[i].getAttribute('data-platform') !== platform) continue
+      if (rows[i].getAttribute('data-arch') !== arch) continue
+      if (rows[i].getAttribute('data-status') === 'deleted') continue
+      if (rows[i].getAttribute('data-missing') === '1') continue
+      return true
+    }
+    return false
+  }
+
   // 提交上传
   form.addEventListener('submit', function (e) {
     e.preventDefault()
@@ -211,6 +229,20 @@
     }
     if (!selectedFile) {
       fail('请选择要上传的产物文件')
+      return
+    }
+
+    // 版本已被占用时必须本地拦住：服务端会在读完 body 之前回 409 就关连接，
+    // 浏览器还在推几百 MB，响应会被 RST 吞掉，用户只会看到「连接中断」。
+    if (isTaken(version, platform, arch)) {
+      var bumped = bumpPatch(version)
+      if (bumped) {
+        fVersion.value = bumped
+        saveMem()
+        updateCoverage()
+      }
+      fail(version + ' / ' + platform + ' / ' + arch + ' 已存在' +
+        (bumped ? '，已自动改为 ' + bumped + '，请确认后再次点击上传' : '，请改用新版本号'))
       return
     }
 
@@ -282,7 +314,9 @@
 
     xhr.onerror = function () {
       resetButton()
-      fail('网络中断，上传失败，请重试（临时文件已清理）')
+      // 这里拿不到服务端的 JSON：多半是服务端提前拒绝后关了连接，响应被 RST 吞掉。
+      // 所以文案不能只说「网络中断」，得把最可能的原因和重试节奏说清楚。
+      fail('连接被中断，未收到服务器响应（临时文件已清理）。请确认该版本号是否已存在，或稍等约 2 分钟后重试')
     }
 
     xhr.send(fd)
