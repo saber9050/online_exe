@@ -31,13 +31,19 @@ import { buildRecord, isVersionTaken, newId, newUploadId } from './record.js'
 import { clientIp, headerText, maxUploadBytes } from './http-helpers.js'
 import { inflight } from './upload.js'
 
-/** 分片大小：8MB 在「请求数」和「单请求耗时」之间比较平衡（400MB = 50 片） */
-const DEFAULT_CHUNK = 8 * 1024 * 1024
+/** 分片大小默认 40MB（用户定的）。上限给到 64MB 留余量，下限 256KB 防止有人传 1 字节一片把服务打满 */
+const DEFAULT_CHUNK = 40 * 1024 * 1024
 const MIN_CHUNK = 256 * 1024
-const MAX_CHUNK = 32 * 1024 * 1024
+const MAX_CHUNK = 64 * 1024 * 1024
 
 /** 会话闲置多久回收。客户端关页面/拔网线时兜底，别让 tmp 和占位挂到进程退出 */
 const SESSION_IDLE_MS = 10 * 60 * 1000
+
+/**
+ * 会话绝对寿命。分片越大、链路越慢，单片传输时间越长；
+ * 光靠「闲置回收」会把正在写的会话误杀，所以再给一条硬上限兜底真正卡死的。
+ */
+const SESSION_MAX_MS = 6 * 60 * 60 * 1000
 
 /** @type {Map<string, Session>} */
 const sessions = new Map()
@@ -88,10 +94,24 @@ async function destroySession(sess) {
 }
 
 const gcTimer = setInterval(() => {
-  const deadline = Date.now() - SESSION_IDLE_MS
+  const now = Date.now()
+  const idleDeadline = now - SESSION_IDLE_MS
+  const hardDeadline = now - SESSION_MAX_MS
   for (const sess of sessions.values()) {
-    if (sess.state === 'open' && sess.updatedAt < deadline) {
-      log({ op: 'gc', id: sess.id, version: sess.version, received: sess.received, chunks: sess.chunks })
+    if (sess.state !== 'open') continue // committing 的一律不碰，避免把 rename 搞坏
+    // 有分片正在写就不按「闲置」回收：40MB 一片在慢链路上要传好几分钟，
+    // 这时候删会话会把正在写的 tmp 一起 unlink 掉，客户端传完才拿到 410，白传。
+    const idle = sess.writing.size === 0 && sess.updatedAt < idleDeadline
+    const tooOld = sess.createdAt < hardDeadline
+    if (idle || tooOld) {
+      log({
+        op: 'gc',
+        id: sess.id,
+        version: sess.version,
+        received: sess.received,
+        chunks: sess.chunks,
+        reason: tooOld ? 'max_age' : 'idle',
+      })
       void destroySession(sess)
     }
   }

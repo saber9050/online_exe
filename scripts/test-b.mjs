@@ -531,11 +531,14 @@ async function main() {
 
   const cbytes = makeBytes(21 * 1024 * 1024 + 11, 'c') // 21MB → 8+8+5 三片
   const cwant = sha256(cbytes)
+  // 显式指定 8MB 分片：服务端默认已改成 40MB，不指定的话 21MB 只有 1 片，
+  // 「乱序并发推分片」这条用例就退化成单发，测不到定位写。
   const cqs = new URLSearchParams({
     version: '2.0.0',
     platform: 'linux',
     arch: 'x64',
     total: String(cbytes.length),
+    chunkSize: String(8 * 1024 * 1024),
   }).toString()
 
   const init = await req(D.url, `/api/uploads?${cqs}`, {
