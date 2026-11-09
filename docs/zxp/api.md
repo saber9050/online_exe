@@ -14,7 +14,7 @@
 | 认证 | **没有账号体系**。`/admin` 与 `/api/*` 由 `ADMIN_ALLOW_CIDR` 做来源网段限制，空值 = 不限制 |
 | 字符集 | 请求与响应一律 UTF-8；上传中文文件名依赖 busboy `defParamCharset: 'utf8'` |
 | 时间 | 响应里的时间**全部是 UTC**（`2026-11-05T02:10:00.000Z`），页面按 `TZ` 转本地 |
-| 请求体 | 只有 `PATCH` 用 `application/json`；`POST /api/releases` 用 `multipart/form-data`；版本号/平台/架构**必须走 query** |
+| 请求体 | 只有 `PATCH` 用 `application/json`；`POST /api/releases` 支持 `multipart/form-data`（CI）和 `application/octet-stream`（管理页，body 即文件）；版本号/平台/架构**必须走 query** |
 | 相对路径 | 响应里的 `download_url` 是相对路径（`/dl/...`），调用方自己拼 host |
 | 错误格式 | 业务错误统一 `{ "error": "中文说明" }`；**例外见 §1.1** |
 
@@ -61,6 +61,11 @@
 | 7 | `POST` | `/api/releases/:id/unyank` | 恢复（冻结表形态，与 #4 等价） | CIDR | ✅ |
 | 8 | `GET` | `/api/orphans` | 列出孤儿文件 | CIDR | ✅ |
 | 9 | `DELETE` | `/api/orphans` | 清空孤儿目录（带 `?path=` 则删单个） | CIDR | ✅ |
+| 10 | `POST` | `/api/uploads` | 开分片上传会话（管理页用） | CIDR | ✅ |
+| 11 | `GET` | `/api/uploads/:id` | 查会话进度（哪些片没到） | CIDR | ✅ |
+| 12 | `PUT` | `/api/uploads/:id/chunks?offset=` | 传一片 | CIDR | ✅ |
+| 13 | `POST` | `/api/uploads/:id/complete` | 校验并提交 | CIDR | ✅ |
+| 14 | `DELETE` | `/api/uploads/:id` | 放弃会话，清 tmp | CIDR | ✅ |
 
 ---
 
@@ -169,7 +174,31 @@ curl.exe -i http://127.0.0.1:8080/healthz
 
 构建机 / CI / 管理页共用同一个接口。**流式接收，进程内存恒定 50–80MB，与包大小无关。**
 
+接口按 `Content-Type` 分流，两条路落到同一套「校验 → 查重 → 占位 → 空间预检 → 落盘 → 提交」逻辑：
+
+| 协议 | 谁在用 | body 形态 |
+|---|---|---|
+| `multipart/form-data` | CI / 脚本 / `curl -F` | 文件在 `file` 字段，`changelog` 在另一字段 |
+| `application/octet-stream` | 管理页 | **body 就是文件本身**，文件名和 `changelog` 走请求头 |
+
+> 为什么留着两套：部分运营商/企业网关的 DPI 会按 `Content-Type` 丢弃上传体。
+> 2026-11-09 实测（同一 5MB 文件、同一出口、同一 URL，唯一变量是 Content-Type）：multipart 的 body 一个包都到不了服务器网卡，octet-stream 正常。管理页因此改走裸流，CI 的 `curl -F` 不受影响。
+
 ### 5.1 请求
+
+**裸流（管理页用，推荐）**
+
+```http
+POST /api/releases?version=1.3.0&platform=windows10&arch=x64
+Content-Type: application/octet-stream
+X-Filename: CoreRunner-1.3.0-win10-x64.exe
+X-Changelog: %E4%BF%AE%E5%A4%8D%E7%99%BB%E5%BD%95%E9%97%AA%E9%80%80%EF%BC%9B%E5%90%AF%E5%8A%A8%E9%80%9F%E5%BA%A6%E4%BC%98%E5%8C%96%2030%25
+Content-Length: 104857600
+
+<二进制>
+```
+
+**multipart（CI 兼容）**
 
 ```http
 POST /api/releases?version=1.3.0&platform=windows10&arch=x64
@@ -194,11 +223,14 @@ Content-Type: application/octet-stream
 | query | `version` | ✅ | 严格 semver `MAJOR.MINOR.PATCH[-prerelease]`，允许 `v` 前缀（服务端剥掉后入库） |
 | query | `platform` | ✅ | `windows7` / `windows10` / `macos` / `linux` |
 | query | `arch` | ✅ | `x64` / `arm64` / `ia32`，且必须落在 8 组白名单内 |
-| multipart | `file` | ✅ | **恰好一个**；超过 `MAX_UPLOAD_MB`（默认 800MB）→ 413 |
-| multipart | `changelog` | | 多行文本，无长度硬限制（`fieldSize` 上限 64KB） |
-| header | `Content-Length` | 建议 | 有值时做空间预检；chunked 时跳过预检，靠写错误兜底 |
+| header | `Content-Type` | ✅ | 必须是 `multipart/form-data` 或 `application/octet-stream`，其余一律 `400` |
+| multipart | `file` | ✅ | **恰好一个**；超过 `MAX_UPLOAD_MB`（默认 800MB）→ `413` |
+| multipart | `changelog` | | 多行文本，`fieldSize` 上限 64KB |
+| header | `X-Filename` | | 裸流专用；**必须 `encodeURIComponent`**（HTTP 头只吃 ASCII）。缺省为 `package-<version>-<platform>-<arch>.bin` |
+| header | `X-Changelog` | | 裸流专用；同样要 `encodeURIComponent`。整个请求头上限 16KB，管理页限制在编码后 8000 字符内 |
+| header | `Content-Length` | 建议 | 有值时做空间预检 + 裸流的单包上限预检；chunked 时跳过预检，靠写入期计数兜底（超限同样 `413`，不会写脏盘） |
 
-**为什么元数据必须走 query**：multipart 的 part 按客户端发送顺序到达。`file` 先到时服务端还不知道版本和平台，就没法算唯一键、没法查重、没法定临时文件路径。query 在请求行里，**一定先于 body 到达**，所以「校验 → 查重 → 占位 → 空间预检」全部在收第一个字节之前完成。
+**为什么元数据必须走 query**：body 是流式的，服务端在收到第一个字节前就要知道唯一键和临时文件路径。query 在请求行里，**一定先于 body 到达**，所以「校验 → 查重 → 占位 → 空间预检」全部能在收第一个字节之前完成。裸流协议下这条更重要——body 里除了文件字节没有任何结构可解析。
 
 字段顺序无关：`-F "file=@a" -F "changelog=x"`（文件在前）同样成功。
 
@@ -252,7 +284,8 @@ Body 是一条 Release DTO（**不含** `downloads`）：
 |---|---|---|
 | `400` | `版本号格式不合法，应为 MAJOR.MINOR.PATCH[-prerelease]` | `version` 缺失 / 非法 |
 | `400` | `平台与架构组合不受支持：<platform>-<arch>` | 不在 8 组白名单 |
-| `400` | `multipart 解析失败，请检查 Content-Type` | Content-Type 不是 multipart |
+| `400` | `Content-Type 必须是 multipart/form-data（file 字段）或 application/octet-stream（body 即文件）` | 两种协议都不是 |
+| `400` | `multipart 解析失败，请检查 Content-Type` | 声明了 multipart 但结构坏了 |
 | `400` | `一次只能上传一个文件` | 两个 `file` part |
 | `400` | `字段数超出限制` | field 数 > 10 |
 | `400` | `请求中没有文件，请用 file 字段上传` | 没有 `file` part |
@@ -288,6 +321,68 @@ curl.exe --progress-bar -X POST "http://10.20.3.10:8080/api/releases?version=1.4
 ```
 
 CI 里跑的是 Linux，用 sh 版（见 §12）。
+
+### 5.7 分片上传（`/api/uploads`）——管理页走这条
+
+**为什么存在**：400MB 单连接在这条链路上**传不完** —— 实测连接会在 24–45 秒被掐断
+（服务端只看到 `request_error` / ECONNRESET），而 400MB 就算跑满速也要 80 秒以上。
+切片之后断了只补一片，不用整包重来。
+
+**分片大小默认 40MB**（400MB 的包只要 10 片）。注意这跟「躲开掐断阈值」是矛盾的：
+链路慢的时候 40MB 一片可能要传好几分钟，照样会被掐。它的收益是请求数少、账目简单，
+代价是单片失败要从头重传 40MB。小包或者链路特别差时用 `?chunk=8` 换回去。
+
+**并发默认是 1，别乱调大**。2026-11-09 在同一台机器、同一个 48MB 文件上实测：
+
+| 并发 | 吞吐 |
+|---|---|
+| 1 | **4.58 MB/s** |
+| 2 | 4.52 MB/s |
+| 3 | 4.15 MB/s |
+| 4 | 3.35 MB/s |
+| 6 | 2.78 MB/s |
+
+并发越多越慢（这条链路上多连接会互相拖累）。真要调，用地址栏参数，不用改代码：
+`/admin?c=4`（1–8）、`/admin?chunk=8`（分片大小 MB，1–64）。
+
+`POST /api/releases` 保持原样，CI / 脚本继续用；管理页走这套。
+
+**流程**
+
+```
+① POST   /api/uploads?version=&platform=&arch=&total=[&chunkSize=]
+   → 201 { id, chunkSize, chunks, total }
+   服务端在这里做完 查重 / 占位 / 磁盘预检 / 建目录 / 预建 tmp（truncate 到 total）
+
+② PUT    /api/uploads/:id/chunks?offset=<片起始字节>
+   Content-Type: application/octet-stream
+   Content-Length 必须严格等于 min(chunkSize, total - offset)
+   → 200 { received, chunks }（重复传同一片返回 duplicate:true，幂等）
+
+③ POST   /api/uploads/:id/complete
+   → 201 + 版本记录 DTO（服务端 fsync + 整读算 sha256 + 落 releases.json）
+
+失败/放弃  DELETE /api/uploads/:id → 204（立刻清 tmp 和占位，不用等 GC）
+断线重连  GET    /api/uploads/:id → { received, chunks, missing:[...], expiresInMs }
+```
+
+**关键约束**
+
+| 项 | 说明 |
+|---|---|
+| `offset` | 必须是 `chunkSize` 的整数倍且 `< total`，否则 `400` |
+| 分片长度 | 必须严格等于 `min(chunkSize, total - offset)`，短一个字节都 `400` |
+| 并发 | 同一片并发重试 → `409`；不同片随便并发，服务端各开各的 fd 定位写 |
+| 会话存活 | 内存态，闲置 10 分钟被 GC，进程重启即失效。客户端拿到 `410` 就重新 init |
+| 提交前置 | 所有分片到齐才允许 `complete`，否则 `400` 并告诉你还差几片 |
+| 提交失败 | 会话退回 `open`，可以直接重试 `complete`，**不用重传分片** |
+| 唯一键 | 与 `POST /api/releases` 共用同一套查重与 `inflight` 占位，两条路不会互相踩 |
+
+**为什么 tmp 要 `truncate(total)` 预分配**：分片是乱序定位写，不预分配的话最后一片之前是一片空洞，
+`stat.size` 会小于 `total`，提交时的长度校验会误判。
+
+**sha256 为什么在最后算**：分片乱序到达，没法边传边累加，只能 commit 时整读一遍。
+400MB 在 2C 的 ECS 上约 2 秒，一次的事情，不影响上传速度。
 
 ---
 

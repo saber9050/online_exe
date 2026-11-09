@@ -6,6 +6,7 @@ import { catalog } from './catalog/catalog.js'
 import { stats } from './catalog/stats.js'
 import { ensureDirs, loadReleases, cleanupTmp, reconcile, flush } from './catalog/persist.js'
 import { inflight } from './routes/upload.js'
+import { drainSessions } from './routes/uploads.js'
 
 async function initStore() {
   await ensureDirs()
@@ -43,6 +44,11 @@ async function main() {
     console.log(`[shutdown] 收到 ${signal}，停止接收新请求`)
 
     server.close()
+
+    // 分片会话先收掉：每个会话都占着一个 inflight 占位，
+    // 不先清掉的话下面那个「等正在进行的上传结束」会白等满 30 秒。
+    const drained = await drainSessions()
+    if (drained > 0) console.log(`[shutdown] 放弃 ${drained} 个未提交的分片会话`)
 
     // 等正在进行的上传结束，最多 30 秒
     const deadline = Date.now() + 30_000

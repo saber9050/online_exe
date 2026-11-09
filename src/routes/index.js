@@ -6,6 +6,7 @@ import { storage } from '../storage/storage.js'
 import { renderDownload } from './pages/download.js'
 import { renderAdmin } from './pages/admin.js'
 import { uploadHandler } from './upload.js'
+import { initUpload, uploadChunk, uploadStatus, completeUpload, abortUpload } from './uploads.js'
 import { downloadHandler } from './download.js'
 import * as releases from './releases.js'
 
@@ -29,6 +30,14 @@ router.get('/admin', renderAdmin)
 // ── 写接口 / 版本管理（成员 B）────────────────────────────
 // 上传：multipart 流式，元数据（version/platform/arch）必须走 query
 router.post('/api/releases', uploadHandler)
+
+// ── 分片上传会话（管理页用，并发多连接提速）──────────────
+// init → 循环 PUT 分片 → complete；放弃时 DELETE。会话只在内存，重启即失效（客户端拿 410 重开）。
+router.post('/api/uploads', initUpload)
+router.get('/api/uploads/:id', uploadStatus)
+router.put('/api/uploads/:id/chunks', uploadChunk)
+router.post('/api/uploads/:id/complete', completeUpload)
+router.delete('/api/uploads/:id', abortUpload)
 // 列表：支持 status / platform 筛选
 router.get('/api/releases', releases.listHandler)
 
