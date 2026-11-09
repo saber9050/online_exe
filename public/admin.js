@@ -210,15 +210,24 @@
   }
 
   // ── 分片上传 ──────────────────────────────────────────────────────
-  // 为什么分片：单连接在乱序严重的链路上会被 TCP 自己压到 400KB/s（实测 21% 报文乱序，
-  // 每 5 个包里就有 1 个到晚了，发送端当成丢包处理、拥塞窗口反复减半）。
-  // 切成 8MB 的片、6 条连接并发，每条连接有自己的拥塞窗口，单条被打下去不影响其它条；
-  // 顺带每片独立重试 —— 断哪片补哪片，不用整包重来。
+  // 为什么分片：400MB 单连接在这条链路上传不完 —— 实测连接会在 24~45 秒被掐断
+  // （服务端只看到 request_error / ECONNRESET），而 400MB 跑满速也要 80 秒以上。
+  // 切成 8MB 一片，单片 1~2 秒就结束，天然躲开那个时长阈值；
+  // 再配上单片重试，断哪片补哪片，不用整包重来。
+  //
+  // 关于并发：**实测这条链路并发越多越慢**，同一台机器同一个文件 48MB：
+  //   1 并发 4.58 MB/s ｜ 2 并发 4.52 ｜ 3 并发 4.15 ｜ 4 并发 3.35 ｜ 6 并发 2.78
+  // 所以默认 1。换成干净链路想调大时，直接在地址栏加 ?c=4，不用改代码重发版。
+  // 分片大小同理：?chunk=16（单位 MB）。
 
-  var CHUNK_SIZE = 8 * 1024 * 1024
+  function intParam(name, def) {
+    var m = new RegExp('[?&]' + name + '=([^&]+)').exec(location.search || '')
+    var n = m ? parseInt(decodeURIComponent(m[1]), 10) : NaN
+    return isFinite(n) ? n : def
+  }
 
-  // 6 是浏览器对同源的 HTTP/1.1 并发上限，设更高只会排队
-  var CONCURRENCY = 6
+  var CONCURRENCY = Math.min(8, Math.max(1, intParam('c', 1)))
+  var CHUNK_SIZE = Math.min(32, Math.max(1, intParam('chunk', 8))) * 1024 * 1024
 
   // 单片最多重试次数（不含首次）
   var MAX_RETRY = 3
@@ -376,7 +385,8 @@
     var initUrl = '/api/uploads?version=' + encodeURIComponent(opts.version) +
       '&platform=' + encodeURIComponent(opts.platform) +
       '&arch=' + encodeURIComponent(opts.arch) +
-      '&total=' + total
+      '&total=' + total +
+      '&chunkSize=' + CHUNK_SIZE
 
     var initHeaders = {}
     try {
