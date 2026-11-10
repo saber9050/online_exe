@@ -58,11 +58,12 @@
               <% if (a.latest) { %><span class="ver"><%= a.latest.version %></span><% } %>
             </div>
 
+            <div class="card-badges">
+              <% if (a.latest && a.latest.is_prerelease) { %><span class="badge badge-beta">Beta</span><span class="dim small">暂无正式版</span><% } %>
+              <% if (a.latest && a.latest.file_missing) { %><span class="badge badge-danger">缺文件</span><% } %>
+            </div>
+
             <% if (a.latest) { %>
-              <div class="card-badges">
-                <% if (a.latest.is_prerelease) { %><span class="badge badge-beta">Beta</span><span class="dim small">暂无正式版</span><% } %>
-                <% if (a.latest.file_missing) { %><span class="badge badge-danger">缺文件</span><% } %>
-              </div>
               <div class="card-meta">大小 <b><%= fmtSize(a.latest.size) %></b></div>
               <div class="card-meta">更新 <b><%= fmtDate(a.latest.uploaded_at) %></b></div>
               <div class="card-meta dim">下载 <%= a.latest.downloads %> 次</div>

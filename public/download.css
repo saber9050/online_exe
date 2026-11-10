@@ -52,26 +52,34 @@
 .subgroup-count { float: right; color: #8a93a6; font-size: 12px; line-height: 24px; }
 .platform-note { color: #8a93a6; font-size: 13px; margin: 6px 0 0; }
 
-/* 架构卡片 */
+/* 架构卡片：同排卡片统一高度，操作按钮贴底对齐，保证「有包 / 无包」两张卡整齐 */
 .cards { margin-top: 4px; }
 .card {
+  position: relative;
   display: inline-block;
   vertical-align: top;
   width: 300px;
+  min-height: 212px;
   margin: 14px 14px 0 0;
-  padding: 16px 18px;
+  padding: 16px 18px 64px;
   border: 1px solid #e6e9ef;
   border-radius: 8px;
   background: #fafbfc;
 }
 .card-empty { background: #f7f8fa; }
-.card-top { margin-bottom: 8px; }
+.card-top { min-height: 22px; margin-bottom: 8px; }
 .card-top:after { content: ""; display: block; clear: both; }
 .card-top .arch { display: inline-block; font-weight: 600; color: #1f2430; }
 .card-top .ver { float: right; color: #2f6fed; font-weight: 700; }
 .card-badges { min-height: 20px; margin-bottom: 4px; }
 .card-meta { color: #5b6478; font-size: 13px; margin: 2px 0; }
-.card .btn { display: block; margin-top: 12px; }
+.card .btn {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 16px;
+  margin: 0;
+}
 
 .tip {
   margin-top: 14px;

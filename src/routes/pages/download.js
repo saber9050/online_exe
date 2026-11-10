@@ -43,12 +43,14 @@ export function renderDownload(req, res) {
     return { ...f, subs, archTotal, archReady }
   })
 
-  // 版本历史：先取全量（已删除的墓碑记录不展示），再按 OS 大类切标签
-  // 客户端只展示「能正常下载」的记录：缺文件（磁盘上已没有包）的整行不出现，
-  // 否则用户点进去只会拿到 410。缺文件记录仍可在管理端看到并重传修复。
+  // 版本历史：只展示「在架(active)且能正常下载」的记录。
+  // - yanked（已撤回）：文件虽还在、直链仍可下，但已不对客户端露出；
+  // - deleted（墓碑）：版本号作废；
+  // - file_missing（磁盘上已没有包）：点进去只会拿到 410。
+  // 这三类都不进客户端版本历史，管理端仍可见并重传修复。
   const allHistory = catalog
     .list()
-    .filter((r) => r.status !== 'deleted' && !r.file_missing)
+    .filter((r) => r.status === 'active' && !r.file_missing)
     .sort((a, b) => {
       const d = compareVersion(b, a)
       if (d !== 0) return d
