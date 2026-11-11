@@ -441,27 +441,32 @@ async function main() {
   })
   check('在架版本重复上传仍 409（没把口子开太大）', dupAgain.status === 409, JSON.stringify(dupAgain.body))
 
-  // 同版本号可能换内容，下载侧不能再让代理/浏览器替服务端接走请求
-  const dl = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
-  const cc = dl.headers.get('cache-control') || ''
-  await dl.arrayBuffer()
-  check('下载响应 private + no-store（不用协商缓存，保证每次点击都到服务端）', cc.includes('no-store') && cc.includes('private'), cc)
-
   // 下载计数口径：一次新下载 +1，Range 续传不重复计
   async function downloadsOf(version, platform) {
     const r = await req(A.url, '/api/releases')
     const rel = (r.body?.releases || []).find((x) => x.version === version && x.platform === platform)
     return rel ? rel.downloads : -1
   }
-  check('直链下载计一次', (await downloadsOf('1.3.0', 'windows10')) === 1, String(await downloadsOf('1.3.0', 'windows10')))
+
+  // 基线不是 0：上面「恢复后直链又能下载 → 200」那次 GET 已经真实下载过一次。
+  // 断言写死 1 / 2 会永远差 1（这一组之前一直是红的），一律相对基线算。
+  const dlBase = await downloadsOf('1.3.0', 'windows10')
+
+  // 同版本号可能换内容，下载侧不能再让代理/浏览器替服务端接走请求
+  const dl = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
+  const cc = dl.headers.get('cache-control') || ''
+  await dl.arrayBuffer()
+  check('下载响应 private + no-store（不用协商缓存，保证每次点击都到服务端）', cc.includes('no-store') && cc.includes('private'), cc)
+
+  check('直链下载计一次', (await downloadsOf('1.3.0', 'windows10')) === dlBase + 1, String(await downloadsOf('1.3.0', 'windows10')))
   await (await fetch(`${A.url}/dl/1.3.0/windows10-x64`)).arrayBuffer()
-  check('再下一次 → 2', (await downloadsOf('1.3.0', 'windows10')) === 2, String(await downloadsOf('1.3.0', 'windows10')))
+  check(`再下一次 → ${dlBase + 2}`, (await downloadsOf('1.3.0', 'windows10')) === dlBase + 2, String(await downloadsOf('1.3.0', 'windows10')))
   await (await fetch(`${A.url}/dl/1.3.0/windows10-x64`, { headers: { Range: 'bytes=100-' } })).arrayBuffer()
-  check('Range 续传不重复计数', (await downloadsOf('1.3.0', 'windows10')) === 2, String(await downloadsOf('1.3.0', 'windows10')))
+  check('Range 续传不重复计数', (await downloadsOf('1.3.0', 'windows10')) === dlBase + 2, String(await downloadsOf('1.3.0', 'windows10')))
   const statRes = await req(A.url, '/api/stats')
   check(
     'GET /api/stats 返回该记录的计数（管理页轮询用）',
-    statRes.status === 200 && statRes.body?.counts?.[up1.body.id] === 2,
+    statRes.status === 200 && statRes.body?.counts?.[up1.body.id] === dlBase + 2,
     JSON.stringify(statRes.body).slice(0, 120),
   )
 
@@ -486,7 +491,11 @@ async function main() {
   const dlRow = (afterRestart.body?.releases || []).find(
     (r) => r.version === '1.3.0' && r.platform === 'windows10',
   )
-  check('重启后下载计数仍是 2（落盘 + 启动加载生效）', dlRow?.downloads === 2, String(dlRow?.downloads))
+  check(
+    `重启后下载计数仍是 ${dlBase + 2}（落盘 + 启动加载生效）`,
+    dlRow?.downloads === dlBase + 2,
+    String(dlRow?.downloads),
+  )
 
   const missingList = await req(A2.url, '/api/releases?status=missing')
   check(
