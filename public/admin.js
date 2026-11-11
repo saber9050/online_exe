@@ -20,6 +20,7 @@
   var fChangelog = $('f-changelog')
   var dz = $('dropzone')
   var dzFile = $('dz-file')
+  var dzHint = $('dz-hint')
   var progressWrap = $('progress-wrap')
   var progressBar = $('progress-bar')
   var uploadMeta = $('upload-meta')
@@ -27,9 +28,14 @@
   var channelTag = $('channel-tag')
   var coverageEl = $('coverage')
   var submitBtn = $('submit-btn')
+  var pauseBtn = $('pause-btn')
+  var cancelBtn = $('cancel-btn')
+  var forceBtn = $('force-release')
 
   var selectedFile = null
   var uploading = false
+  // 当前正在上传的会话 id：页面刷新/关闭时据此调 DELETE，把服务端会话和占位一起收掉
+  var activeUploadId = ''
 
   function platformById(id) {
     for (var i = 0; i < PLATFORMS.length; i++) {
@@ -132,10 +138,69 @@
   }
 
   function setFile(file) {
+    if (file) {
+      var check = checkFile(file)
+      if (!check.ok) {
+        // 不合规的文件不进 selectedFile：按钮点了也只会拿到后端 400，不如当场说清楚
+        selectedFile = null
+        dzFile.textContent = ''
+        fFile.value = ''
+        fail(check.error)
+        return false
+      }
+    }
     selectedFile = file || null
     dzFile.textContent = selectedFile
       ? selectedFile.name + ' · ' + fmtBytes(selectedFile.size)
       : ''
+    if (selectedFile) {
+      formTip.className = 'form-tip'
+      formTip.textContent = ''
+    }
+    return true
+  }
+
+  // ── 文件类型白名单 ────────────────────────────────────────────────
+  // 规则来自服务端 src/filetypes.js（admin.ejs 把列表与提示文案序列化到 data-ext-*），
+  // 前端只负责「选的时候就告诉用户不行」，真正的拦截仍在后端。
+  // 后缀全平台通用：换平台不会让已选文件失效，平台只决定这条记录归到哪个区块。
+  var EXT_LIST = []
+  try { EXT_LIST = JSON.parse(form.getAttribute('data-ext-list') || '[]') } catch (e) { EXT_LIST = [] }
+  var EXT_TEXT = form.getAttribute('data-ext-text') || EXT_LIST.join(' / ')
+  // 异常提示里用紧凑写法（无空格），尽量压在一条行内，别把按钮区撑成两行
+  var EXT_TEXT_COMPACT = form.getAttribute('data-ext-compact') || EXT_LIST.join('/')
+
+  // 多段后缀优先匹配，与 filetypes.js 的 fileExt() 一致（否则 x.tar.gz 会被切成 .gz）
+  var MULTI_EXTS = ['.tar.gz', '.tar.xz', '.tar.bz2']
+
+  function fileExt(name) {
+    var n = String(name || '').trim().toLowerCase()
+    if (!n) return ''
+    for (var i = 0; i < MULTI_EXTS.length; i++) {
+      if (n.slice(-MULTI_EXTS[i].length) === MULTI_EXTS[i]) return MULTI_EXTS[i]
+    }
+    var dot = n.lastIndexOf('.')
+    if (dot <= 0 || dot === n.length - 1) return ''
+    return n.slice(dot)
+  }
+
+  /** 拖拽区下方的「仅接受 …」提示：白名单全平台一致，只需渲染一次 */
+  function refreshDzHint() {
+    if (!dzHint) return
+    dzHint.textContent = EXT_LIST.length ? '仅接受安装包：' + EXT_TEXT : ''
+  }
+
+  /** @returns {{ok:true, ext:string} | {ok:false, error:string}} */
+  function checkFile(file) {
+    if (!file) return { ok: false, error: '请选择要上传的产物文件' }
+    var ext = fileExt(file.name)
+    if (ext && EXT_LIST.indexOf(ext) >= 0) return { ok: true, ext: ext }
+    var why = ext ? '（' + ext + '）' : '（没有扩展名）'
+    return {
+      ok: false,
+      error: '「' + file.name + '」不是安装包' + why + '；仅接受 ' + EXT_TEXT_COMPACT +
+        '。图片、视频、PDF、文档等一律不允许上传。',
+    }
   }
 
   function fail(msg) {
@@ -145,8 +210,16 @@
 
   function resetButton() {
     uploading = false
+    activeUploadId = ''
     submitBtn.disabled = false
     submitBtn.textContent = '开始上传'
+    pauseBtn.hidden = true
+    pauseBtn.disabled = false
+    pauseBtn.textContent = '暂停上传'
+    cancelBtn.hidden = true
+    forceBtn.hidden = true
+    forceBtn.disabled = false
+    forceBtn.textContent = '释放上次残留'
   }
 
   // 初始化：恢复表单记忆
@@ -155,11 +228,13 @@
   renderArchs(mem.arch)
   if (mem.version) fVersion.value = mem.version
   updateCoverage()
+  refreshDzHint()
 
   fPlatform.addEventListener('change', function () {
     renderArchs(null)
     saveMem()
     updateCoverage()
+    // 换平台不需要重判已选文件：白名单对所有平台一致，选择保持有效
   })
   fArch.addEventListener('change', saveMem)
   fVersion.addEventListener('input', function () {
@@ -255,6 +330,12 @@
       fail('请选择要上传的产物文件')
       return
     }
+    // 后端还会再判一次，这里只是省掉一次注定失败的往返（尤其大文件要等很久）
+    var typeCheck = checkFile(selectedFile)
+    if (!typeCheck.ok) {
+      fail(typeCheck.error)
+      return
+    }
 
     // 版本已被占用时必须本地拦住：服务端会在读完 body 之前回 409 就关连接，
     // 浏览器还在推几百 MB，响应会被 RST 吞掉，用户只会看到「连接中断」。
@@ -290,24 +371,75 @@
     })
   })
 
+  // 页面刷新 / 关闭 = 取消上传：把服务端会话和 inflight 占位一起收掉，
+  // 否则同版本再次上传会一直吃 409（要等 10 分钟闲置 GC 才释放）。
+  window.addEventListener('pagehide', function () {
+    if (!activeUploadId) return
+    var url = '/api/uploads/' + encodeURIComponent(activeUploadId)
+    activeUploadId = ''
+    try {
+      // keepalive 让请求在页面卸载后仍能发出（DELETE 也支持）
+      fetch(url, { method: 'DELETE', keepalive: true })
+    } catch (e) { /* ignore */ }
+  })
+
+  // 「释放上次残留」：按 version+platform+arch 清掉异常中断留下的会话，然后自动重传
+  forceBtn.addEventListener('click', function () {
+    var version = normalize(fVersion.value)
+    var platform = fPlatform.value
+    var arch = fArch.value
+    forceBtn.disabled = true
+    forceBtn.textContent = '正在释放…'
+    fetch('/api/uploads?version=' + encodeURIComponent(version) +
+      '&platform=' + encodeURIComponent(platform) +
+      '&arch=' + encodeURIComponent(arch), { method: 'DELETE' })
+      .then(function (r) {
+        forceBtn.disabled = false
+        forceBtn.textContent = '释放上次残留'
+        if (!r.ok) {
+          fail('释放失败（HTTP ' + r.status + '），请稍后再试')
+          return
+        }
+        forceBtn.hidden = true
+        formTip.className = 'form-tip ok'
+        formTip.textContent = '已释放上次残留，正在重新上传…'
+        if (form.requestSubmit) form.requestSubmit()
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      })
+      .catch(function () {
+        forceBtn.disabled = false
+        forceBtn.textContent = '释放上次残留'
+        fail('释放失败：连接中断')
+      })
+  })
+
   function startChunkedUpload(opts) {
     var file = opts.file
     var total = file.size
     var id = ''
     var chunkSize = CHUNK_SIZE
     var chunks = 0
-    var nextIndex = 0
-    var active = 0
     var okChunks = 0
     var completedBytes = 0
     var loaded = {}        // index -> 该片已发出字节（只用于进度显示）
     var startedAt = 0
     var finished = false
+    var paused = false
+    var queue = []         // 待传分片序号
+    var xhrs = {}          // index -> 正在飞的 XHR，暂停/取消时中断
+    var gen = 0            // 代际：暂停/取消时 +1，让旧请求的回调全部失效
     var renderTimer = null
+    var heartbeat = null
 
     uploading = true
+    activeUploadId = ''
     submitBtn.disabled = true
     submitBtn.textContent = '上传中…'
+    pauseBtn.hidden = true
+    pauseBtn.disabled = false
+    pauseBtn.textContent = '暂停上传'
+    cancelBtn.hidden = false
+    forceBtn.hidden = true
     formTip.className = 'form-tip'
     formTip.textContent = ''
     progressWrap.classList.add('show')
@@ -315,27 +447,78 @@
     uploadMeta.textContent = '正在建立上传会话…'
     startedAt = Date.now()
 
+    // 用 onclick 覆盖而不是 addEventListener：不会每传一次就多挂一份监听
+    pauseBtn.onclick = function () { paused ? resumeUpload() : pauseUpload() }
+    cancelBtn.onclick = cancelUpload
+
     function scheduleRender() {
       if (renderTimer) return
       renderTimer = setTimeout(function () { renderTimer = null; render() }, 200)
     }
 
     function render() {
-      var inflight = 0
-      for (var k in loaded) inflight += loaded[k]
-      var done = Math.min(total, completedBytes + inflight)
+      // 暂停期间进度冻结：中断的分片要重传，不能让进度条往回跳
+      if (paused) return
+      var inflightBytes = 0
+      for (var k in loaded) inflightBytes += loaded[k]
+      var done = Math.min(total, completedBytes + inflightBytes)
       var pct = total > 0 ? done / total * 100 : 0
       progressBar.style.width = pct.toFixed(1) + '%'
       var sec = (Date.now() - startedAt) / 1000
       var speed = sec > 0 ? done / sec : 0
       uploadMeta.textContent = pct.toFixed(1) + '% · ' +
         fmtBytes(done) + ' / ' + fmtBytes(total) + ' · ' +
-        fmtBytes(speed) + '/s · 分片 ' + okChunks + '/' + chunks
+        fmtBytes(speed) + '/s · 分片 ' + okChunks + '/' + chunks +
+        (paused ? ' · 已暂停' : '')
+    }
+
+    function stopHeartbeat() {
+      if (heartbeat) {
+        clearInterval(heartbeat)
+        heartbeat = null
+      }
+    }
+
+    // 暂停期间没有任何请求，靠定时查进度给会话续命：服务端 uploadStatus 会刷新 updatedAt，
+    // 否则闲置 10 分钟就被 GC 掉，点「继续」只能看到 410。
+    function startHeartbeat() {
+      if (heartbeat) return
+      heartbeat = setInterval(function () {
+        if (finished || !id) return
+        fetch('/api/uploads/' + encodeURIComponent(id))
+          .then(function (r) {
+            if (r.status === 410) finishWithError('上传会话已过期（暂停太久），请重新上传')
+          })
+          .catch(function () { /* 单次心跳失败不处理，下一轮再试 */ })
+      }, 60000)
+    }
+
+    /** 中断所有在飞请求并让它们的回调失效，避免暂停后旧请求继续触发重试/计数 */
+    function abortAllXhr() {
+      gen += 1
+      var list = xhrs
+      xhrs = {}
+      loaded = {}
+      for (var k in list) {
+        try { list[k].abort() } catch (e) { /* ignore */ }
+      }
+    }
+
+    function dropSession() {
+      if (!id) return
+      var url = '/api/uploads/' + encodeURIComponent(id)
+      id = ''
+      activeUploadId = ''
+      try {
+        fetch(url, { method: 'DELETE', keepalive: true })
+      } catch (e) { /* ignore */ }
     }
 
     function finishWithError(msg, body) {
       if (finished) return
       finished = true
+      stopHeartbeat()
+      abortAllXhr()
       resetButton()
       if (!msg) msg = '上传失败'
       if (body && body.existing && body.existing.version) {
@@ -353,10 +536,69 @@
     function giveUp(msg) {
       if (finished) return
       // 主动把会话删掉，别让服务器上的 tmp 和占位挂到 10 分钟后被 GC
-      if (id) {
-        try { fetch('/api/uploads/' + encodeURIComponent(id), { method: 'DELETE' }) } catch (e) { /* ignore */ }
-      }
+      dropSession()
       finishWithError(msg)
+    }
+
+    function cancelUpload() {
+      if (finished) return
+      if (!window.confirm('确定取消本次上传？\n服务器上已传的分片会被删除。')) return
+      giveUp('已取消上传，服务器上的临时分片已清理')
+    }
+
+    function pauseUpload() {
+      if (finished || paused || !id) return
+      // 中断前先把「已发出但还没确认」的字节也算上，暂停那一瞬间的进度条不往回跳
+      var shown = completedBytes
+      for (var k in loaded) shown += loaded[k]
+      shown = Math.min(total, shown)
+      paused = true
+      abortAllXhr()
+      startHeartbeat()
+      pauseBtn.textContent = '继续上传'
+      var pct = total > 0 ? shown / total * 100 : 0
+      progressBar.style.width = pct.toFixed(1) + '%'
+      uploadMeta.textContent = pct.toFixed(1) + '% · ' +
+        fmtBytes(shown) + ' / ' + fmtBytes(total) + ' · 已暂停'
+    }
+
+    function resumeUpload() {
+      if (finished || !paused) return
+      pauseBtn.disabled = true
+      fetch('/api/uploads/' + encodeURIComponent(id))
+        .then(function (r) {
+          if (r.status === 410) {
+            finishWithError('上传会话已过期（暂停太久），请重新上传')
+            return null
+          }
+          if (!r.ok) throw new Error('HTTP ' + r.status)
+          return r.json()
+        })
+        .then(function (d) {
+          if (!d || finished) return
+          // 以服务端为准重建进度和待传队列：暂停时中断的那片本来就没算成功
+          var missing = d.missing || []
+          var doneBytes = 0
+          for (var i = 0; i < chunks; i++) {
+            if (missing.indexOf(i) !== -1) continue
+            var s = i * chunkSize
+            doneBytes += Math.min(s + chunkSize, total) - s
+          }
+          okChunks = chunks - missing.length
+          completedBytes = doneBytes
+          queue = missing.slice()
+          loaded = {}
+          paused = false
+          pauseBtn.disabled = false
+          pauseBtn.textContent = '暂停上传'
+          stopHeartbeat()
+          scheduleRender()
+          pump()
+        })
+        .catch(function () {
+          pauseBtn.disabled = false
+          fail('查询上传进度失败，请再点一次「继续上传」')
+        })
     }
 
     function onUploaded(data) {
@@ -402,11 +644,24 @@
           try { data = JSON.parse(t || '{}') } catch (e) { /* ignore */ }
           if (!r.ok) {
             finishWithError(data.error || ('无法建立上传会话（HTTP ' + r.status + '）'), data)
+            // 上次异常中断留下的占位：给一个按钮直接释放，不用等 10 分钟 GC
+            if (data.code === 'inflight') forceBtn.hidden = false
+            return
+          }
+          // 建会话期间用户已经点了「取消」：把刚建出来的会话立刻删掉，别留占位
+          if (finished) {
+            try {
+              fetch('/api/uploads/' + encodeURIComponent(data.id), { method: 'DELETE', keepalive: true })
+            } catch (e4) { /* ignore */ }
             return
           }
           id = data.id
+          activeUploadId = id
           chunkSize = data.chunkSize || CHUNK_SIZE
           chunks = data.chunks
+          queue = []
+          for (var qi = 0; qi < chunks; qi++) queue.push(qi)
+          pauseBtn.hidden = false
           pump()
         })
       })
@@ -414,51 +669,56 @@
         finishWithError('无法建立上传会话：连接被中断')
       })
 
-    // ② 并发推分片：保持 CONCURRENCY 个在飞，谁先回来谁补下一个
+    // ② 并发推分片：在飞数量 = xhrs 的键数，谁先回来谁补下一个
     function pump() {
-      if (finished) return
-      while (active < CONCURRENCY && nextIndex < chunks) {
-        sendChunk(nextIndex)
-        nextIndex += 1
+      if (finished || paused) return
+      while (queue.length > 0 && Object.keys(xhrs).length < CONCURRENCY) {
+        attempt(queue.shift())
       }
       if (okChunks === chunks && chunks > 0) commit()
     }
 
-    function sendChunk(index) {
+    function attempt(index) {
+      if (finished || paused) return
+      var myGen = gen
       var start = index * chunkSize
       var end = Math.min(start + chunkSize, total)
       var size = end - start
-      var attempt = 0
-      active += 1
-      loaded[index] = 0
+      var tries = 0
 
-      function retry(why) {
-        attempt += 1
-        loaded[index] = 0
-        if (attempt <= MAX_RETRY && !finished) {
-          setTimeout(go, 400 * attempt)
-          return
-        }
-        active -= 1
-        giveUp('第 ' + (index + 1) + ' 片重试 ' + MAX_RETRY + ' 次仍失败（' + why + '）。已上传 ' +
-          okChunks + '/' + chunks + ' 片，重试会重新开始；可换网络后再试。')
-      }
-
-      function go() {
-        if (finished) return
+      function send() {
+        if (finished || paused || myGen !== gen) return
         var xhr = new XMLHttpRequest()
+        var settled = false
+        xhrs[index] = xhr
+        loaded[index] = 0
+
+        function retry(why) {
+          loaded[index] = 0
+          tries += 1
+          if (tries > MAX_RETRY) {
+            giveUp('第 ' + (index + 1) + ' 片重试 ' + MAX_RETRY + ' 次仍失败（' + why + '）。已上传 ' +
+              okChunks + '/' + chunks + ' 片，重试会重新开始；可换网络后再试。')
+            return
+          }
+          setTimeout(send, 400 * tries)
+        }
+
         xhr.open('PUT', '/api/uploads/' + encodeURIComponent(id) + '/chunks?offset=' + start, true)
         // 与单包上传同一个理由：刻意不用 multipart，链路会按 Content-Type 丢包
         xhr.setRequestHeader('Content-Type', 'application/octet-stream')
         xhr.upload.onprogress = function (ev) {
-          if (!ev.lengthComputable) return
+          if (!ev.lengthComputable || paused || myGen !== gen) return
           loaded[index] = ev.loaded
           scheduleRender()
         }
         xhr.onload = function () {
+          if (settled) return
+          settled = true
+          if (myGen !== gen) return          // 暂停/取消后残留的旧请求，回调全部作废
+          delete xhrs[index]
           if (finished) return
           if (xhr.status >= 200 && xhr.status < 300) {
-            active -= 1
             okChunks += 1
             completedBytes += size
             delete loaded[index]
@@ -470,27 +730,43 @@
           try { msg = (JSON.parse(xhr.responseText || '{}').error) || '' } catch (e2) { /* ignore */ }
           // 410 = 会话被回收（服务重启 / 闲置超时），重试也没用
           if (xhr.status === 410) {
-            active -= 1
             giveUp(msg || '上传会话已过期，请重新上传')
             return
           }
           retry(msg || ('HTTP ' + xhr.status))
         }
-        xhr.onerror = function () { retry('连接中断') }
-        xhr.onabort = function () { retry('请求被中止') }
+        xhr.onerror = function () {
+          if (settled) return
+          settled = true
+          if (myGen !== gen) return
+          delete xhrs[index]
+          retry('连接中断')
+        }
+        xhr.onabort = function () {
+          if (settled) return
+          settled = true
+          if (myGen !== gen) return
+          delete xhrs[index]
+          retry('请求被中止')
+        }
         try {
           xhr.send(file.slice(start, end))
         } catch (e3) {
+          if (settled) return
+          settled = true
+          if (myGen !== gen) return
+          delete xhrs[index]
           retry('切片失败')
         }
       }
 
-      go()
+      send()
     }
 
     // ③ 让服务端做 fsync + sha256 + 落记录
     function commit() {
       if (finished) return
+      stopHeartbeat()
       if (renderTimer) { clearTimeout(renderTimer); renderTimer = null }
       progressBar.style.width = '100%'
       uploadMeta.textContent = '分片已传完，正在校验并提交…'
@@ -948,6 +1224,42 @@
           orphanClear.disabled = false
           window.alert('清理失败：' + err.message)
         })
+    })
+  }
+
+  // ── 下载次数自动刷新 ────────────────────────────────────────────
+  // 这一列是服务端渲染的，用户去客户端下载完再回来，不刷新页面就永远看到旧值，
+  // 很容易被当成「统计不到」。这里每 10 秒拉一次 /api/stats 就地改单元格，
+  // 不动筛选、不动滚动位置；切回标签页时立刻补一次。
+  var COUNT_POLL_MS = 10000
+  var countTimer = null
+
+  function applyCounts(counts) {
+    var rows = allRows()
+    for (var i = 0; i < rows.length; i++) {
+      var id = rows[i].getAttribute('data-id')
+      var cell = rows[i].querySelector('.cell-downloads')
+      if (!id || !cell) continue
+      var n = counts[id] || 0
+      if (cell.textContent !== String(n)) cell.textContent = String(n)
+    }
+  }
+
+  function pollCounts() {
+    if (document.hidden) return
+    fetchJson('/api/stats')
+      .then(function (res) { applyCounts((res && res.counts) || {}) })
+      .catch(function () { /* 网络抖动忽略，下一轮再试 */ })
+  }
+
+  if (allRows().length > 0) {
+    countTimer = setInterval(pollCounts, COUNT_POLL_MS)
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) pollCounts()
+    })
+    // 卸载时清掉，避免 bfcache 里留一个还在跑的定时器
+    window.addEventListener('pagehide', function () {
+      if (countTimer) { clearInterval(countTimer); countTimer = null }
     })
   }
 })()

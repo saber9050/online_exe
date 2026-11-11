@@ -34,7 +34,8 @@
 
 - 按平台分块 + 锚点导航（JS 禁用也能用），Win7 / Win10 是两个独立区块
 - `sendFile` 原生支持 Range，断点续传、条件请求（ETag = 内容 sha256）
-- 缓存策略 `no-cache` + ETag：每次回源校验，内容没变就是 304
+- 缓存策略 `private, no-store`：不给浏览器/代理留缓存。下载次数靠服务端计数，
+  一旦被内网 nginx 或公司代理缓存，第二次点击根本到不了 Node，统计就永远是 0
 
 **运维**
 
@@ -185,13 +186,15 @@ npm run seed
 | `PUT` | `/api/uploads/:id/chunks?offset=` | 传一片（`application/octet-stream`） |
 | `POST` | `/api/uploads/:id/complete` | 校验并提交分片 |
 | `DELETE` | `/api/uploads/:id` | 放弃分片会话 |
+| `DELETE` | `/api/uploads?version=&platform=&arch=` | 按业务键强制释放上次中断残留的占位 |
 | `PATCH` | `/api/releases/:id` | 撤回 / 恢复（body `{"status":"yanked"\|"active"}`） |
 | `POST` | `/api/releases/:id/yank` | 撤回（等价写法） |
 | `POST` | `/api/releases/:id/unyank` | 恢复（等价写法） |
 | `DELETE` | `/api/releases/:id` | 删除（墓碑，可重发同版本） |
 | `GET` | `/api/orphans` | 列出孤儿文件 |
 | `DELETE` | `/api/orphans` | 清空孤儿（带 `?path=` 则删单个） |
-| `GET` | `/dl/:version/:combo` | 下载直链，如 `/dl/1.3.0/windows10-x64` |
+| `GET` | `/dl/:version/:combo` | 下载直链，如 `/dl/1.3.0/windows10-x64`（每次请求都给计数 +1） |
+| `GET` | `/api/stats` | 各版本下载计数 `{counts:{id:n}}`，管理页每 10 秒轮询它刷新「下载」列 |
 
 CI 上传示例：
 
@@ -202,6 +205,12 @@ curl.exe -X POST "http://10.20.3.10:8080/api/releases?version=1.3.0&platform=win
 ```
 
 > PowerShell 里 `curl` 是 `Invoke-WebRequest` 的别名，必须写 **`curl.exe`**；续行是反引号不是 `\`。
+
+**上传只收安装包**：文件名后缀必须在白名单内
+（`.exe` `.msi` `.msix` `.msixbundle` `.appx` `.dmg` `.pkg` `.deb` `.rpm` `.AppImage`
+`.run` `.sh` `.tar.gz` `.tar.xz` `.tgz` `.zip` `.7z`），**所有平台通用**，不按平台切分。
+图片、视频、音频、PDF/文档、源码、手机包、镜像等一律 `400 bad_filetype`，详见 `docs/zxp/api.md` §5.8。
+白名单只有一份（`src/filetypes.js`），管理页的 `accept` 过滤与即时提示都从它生成。
 
 ---
 
@@ -230,7 +239,7 @@ curl.exe -X POST "http://10.20.3.10:8080/api/releases?version=1.3.0&platform=win
 | **没有登录** | 内网即信任。要限制访问范围就配 `ADMIN_ALLOW_CIDR`，别指望它挡得住同网段的人 |
 | **删除是墓碑** | 文件立即删，记录保留（可在「已删除」筛选里查到）。**删除后可以重新上传同一版本号**，会沿用原 `id`，下载计数不清零 |
 | **在架版本不可覆盖** | 想换内容只能先删再传，或者发新版本号 |
-| **下载缓存是 `no-cache`** | 因为同版本号可能被重发，URL 内容会变；ETag 用内容 sha256，没变就是 304 |
+| **下载缓存是 `private, no-store`** | 一是同版本号可能被重发、URL 内容会变；二是下载计数只在服务端做，任何一层缓存都会让「点了下载但没统计上」 |
 | **孤儿文件不会自动删** | 对账只把它们挪进 `data/orphan/`，需要人在管理页确认后清理 |
 | **没有请求日志** | 只有启动/退出/对账/5xx 会打日志；上传下载的成功与失败都不落日志，排查靠页面提示 + 浏览器 Network |
 | **单进程** | 上传提交、JSON 写盘都靠单线程串行保证一致性，**不要横向扩多副本**（会互相覆盖 `releases.json`） |

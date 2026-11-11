@@ -104,6 +104,16 @@ a:hover { text-decoration: underline; }
   border-color: #e6e9ef;
   color: #a0a8b8;
   cursor: not-allowed;
+  box-shadow: none;
+}
+/* 禁用态必须始终是灰色：.btn:hover 的优先级(0,2,0)比 .btn-disabled(0,1,0) 高，
+   不加这条的话鼠标移上去会被染成蓝色。这里的优先级与之相同、且排在后面。 */
+.btn-disabled:hover, .btn-disabled:active,
+.btn:disabled:hover, .btn:disabled:active {
+  background: #e6e9ef;
+  border-color: #e6e9ef;
+  color: #a0a8b8;
+  text-decoration: none;
 }
 .btn-danger { background: #fff; border-color: #e0b4b0; color: #c0392b; }
 .btn-danger:hover { background: #fdeaea; }

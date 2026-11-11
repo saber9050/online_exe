@@ -22,6 +22,7 @@ import { enqueueWrite, writeAtomic, serialize } from '../catalog/persist.js'
 import { getFreeBytes, tryReserve, releaseReserve, getReservedBytes } from '../storage/reserve.js'
 import { parseVersion } from '../semver.js'
 import { PLATFORM_ARCH_SET } from '../constants.js'
+import { validatePackageName } from '../filetypes.js'
 import { toReleaseDto } from './dto.js'
 import { buildRecord, isVersionTaken, newId } from './record.js'
 import { clientIp, headerText, maxUploadBytes } from './http-helpers.js'
@@ -149,6 +150,18 @@ export async function uploadHandler(req, res) {
   const version = parsed.version
   const key = `${platform}|${arch}|${version}`
 
+  // 文件类型闸门。裸流的文件名在请求头里，进门就能判；
+  // multipart 要等 busboy 解析到 file 字段才知道文件名，只能在 bb.on('file') 里判。
+  // 两处都必须拦：前端 accept 是可以绕过的，接口才是唯一可信的关卡。
+  const nameHeader = headerText(req, 'x-filename')
+  if (rawBody) {
+    const typeCheck = validatePackageName(nameHeader)
+    if (!typeCheck.ok) {
+      logReject(req, 'bad_filetype', { filename: nameHeader || '' })
+      return rejectEarly(req, res, 400, { code: 'bad_filetype', error: typeCheck.error })
+    }
+  }
+
   // 这一段同步执行，查重 + 占位天然原子
   const existing = catalog.get(platform, arch, version)
   if (isVersionTaken(existing)) {
@@ -165,7 +178,8 @@ export async function uploadHandler(req, res) {
   if (inflight.has(key)) {
     logReject(req, 'inflight', { since: new Date(inflight.get(key)).toISOString() })
     return rejectEarly(req, res, 409, {
-      error: '该版本正在上传（可能是上次中断的残留），请约 2 分钟后再试',
+      code: 'inflight',
+      error: '该版本正在上传（可能是上次中断的残留），可稍后重试，或点「释放上次残留」立即解除占用',
     })
   }
   inflight.set(key, Date.now())
@@ -178,7 +192,7 @@ export async function uploadHandler(req, res) {
   let bytesWritten = 0
   let bytesReceived = 0
   // 裸流没有 multipart 字段，文件名与更新说明只能走请求头；multipart 走字段，这两行会被覆盖
-  let userFilename = headerText(req, 'x-filename') || null
+  let userFilename = nameHeader || null
   let changelog = headerText(req, 'x-changelog')
   let reserved = 0
   let released = false
@@ -221,7 +235,7 @@ export async function uploadHandler(req, res) {
     timer.unref?.()
   }
 
-  function abort(code, msg, reason) {
+  function abort(code, msg, reason, extra) {
     if (state !== 'receiving') return
     state = 'aborted'
     logReject(req, reason || 'aborted', { code, message: msg })
@@ -235,7 +249,7 @@ export async function uploadHandler(req, res) {
     }
     streams.clear()
     void cleanupAfterAbort()
-    if (!res.headersSent && !res.destroyed) res.status(code).json({ error: msg })
+    if (!res.headersSent && !res.destroyed) res.status(code).json({ error: msg, ...(extra || {}) })
   }
 
   /** 中断后的收尾：清理任务最多等 3 秒，不能让它把 tmp 文件永久留下。 */
@@ -528,7 +542,19 @@ export async function uploadHandler(req, res) {
         stream.resume()
         return
       }
-      if (!userFilename && info && info.filename) userFilename = info.filename
+      // multipart 的文件名以表单字段为准，没有再退回请求头（curl -F 只会给字段）
+      const actualName = (info && info.filename) || userFilename || ''
+      const typeCheck = validatePackageName(actualName)
+      if (!typeCheck.ok) {
+        // 不落盘、不占 tmp：直接排空这条文件流并复用统一的中断出口
+        logReject(req, 'bad_filetype', { filename: actualName })
+        stream.resume()
+        abort(400, typeCheck.error, 'bad_filetype', { code: 'bad_filetype' })
+        return
+      }
+      // multipart 以表单字段的文件名为准（没有才退回请求头），存的就是刚校验过的那个，
+      // 避免「校验 A 存 B」留下一个没白名单校验过的后缀
+      userFilename = actualName
       runFilePipeline(stream)
     })
 

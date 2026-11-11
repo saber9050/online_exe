@@ -121,6 +121,7 @@ main.wrap { padding-top: 24px; }
 }
 .dropzone.hover { border-color: #2f6fed; background: #f0f5ff; }
 .dropzone b { display: block; color: #3d4657; font-size: 15px; margin-bottom: 4px; }
+.dz-hint { margin-top: 8px; color: #98a1b3; font-size: 12px; line-height: 1.5; word-break: break-all; }
 .dz-file { margin-top: 8px; color: #2f6fed; font-size: 13px; }
 
 .progress {
@@ -136,7 +137,22 @@ main.wrap { padding-top: 24px; }
 
 .upload-meta { color: #5b6478; font-size: 12px; min-height: 18px; margin-bottom: 10px; }
 .form-actions { margin-top: 4px; }
-.form-tip { margin-left: 12px; color: #8a93a6; font-size: 12px; }
+.form-actions .btn { margin-right: 8px; }
+/* .btn 自带 display:inline-block，会盖掉 UA 的 [hidden]{display:none}，这里显式兜住 */
+.form-actions [hidden] { display: none !important; }
+/* 次要操作按钮（暂停/取消）：白底描边，别和主按钮抢视觉 */
+.btn-ghost { background: #fff; border-color: #d5dae4; color: #3d4657; }
+.btn-ghost:hover { background: #f5f7fa; border-color: #2f6fed; color: #2f6fed; }
+/* inline-block + max-width：提示过长时在自己的框内折行，不会跑到按钮左侧的空白处，
+   折出来的第二行仍与第一行左对齐（inline 元素的续行会回到容器行首，看着像错位） */
+.form-tip {
+  display: inline-block;
+  vertical-align: middle;
+  max-width: calc(100% - 120px);
+  margin-left: 12px;
+  color: #8a93a6;
+  font-size: 12px;
+}
 .form-tip.err { color: #c0392b; }
 .form-tip.ok { color: #1f8a4c; }
 

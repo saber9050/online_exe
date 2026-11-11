@@ -34,10 +34,13 @@
   <section class="panel">
     <div class="panel-head">
       <h2>上传新版本</h2>
-      <span class="dim">单包上限 <%= maxUploadMb %>MB · 仅 8 组合白名单</span>
+      <span class="dim">单包上限 <%= maxUploadMb %>MB · 仅 8 组合白名单 · 仅接受安装包</span>
     </div>
 
-    <form id="upload-form" class="upload-form" autocomplete="off">
+    <form id="upload-form" class="upload-form" autocomplete="off"
+          data-ext-list="<%= JSON.stringify(packageExts) %>"
+          data-ext-text="<%= packageExtText %>"
+          data-ext-compact="<%= packageExtCompact %>">
       <div class="form-row">
         <label class="field">
           <span>版本号</span>
@@ -66,15 +69,20 @@
       <div class="dropzone" id="dropzone">
         <b>拖拽产物到此处</b>
         <span>或点击选择文件</span>
+        <div class="dz-hint" id="dz-hint">仅接受安装包：<%= packageExtText %></div>
         <div class="dz-file" id="dz-file"></div>
       </div>
-      <input type="file" id="f-file" hidden>
+      <%# accept 只是选择器的过滤，真正的判定在 admin.js 和后端 filetypes.js %>
+      <input type="file" id="f-file" accept="<%= allPackageExts.join(',') %>" hidden>
 
       <div class="progress" id="progress-wrap"><div class="bar" id="progress-bar"></div></div>
       <div class="upload-meta" id="upload-meta"></div>
 
       <div class="form-actions">
         <button type="submit" class="btn" id="submit-btn">开始上传</button>
+        <button type="button" class="btn btn-ghost" id="pause-btn" hidden>暂停上传</button>
+        <button type="button" class="btn btn-danger" id="cancel-btn" hidden>取消</button>
+        <button type="button" class="btn btn-danger" id="force-release" hidden>释放上次残留</button>
         <span class="form-tip" id="form-tip"></span>
       </div>
     </form>
@@ -138,7 +146,7 @@
               <% if (r.status === 'active') { %><span class="badge badge-ok">在架</span><% } %>
               <% if (r.file_missing) { %><span class="badge badge-danger">缺文件</span><% } %>
             </td>
-            <td><%= r.downloads %></td>
+            <td class="cell-downloads" title="服务端收到的下载请求次数"><%= r.downloads %></td>
             <td class="ops">
               <%# 按钮按「status × file_missing」两个维度给，不给所有行同一套。
                   两个维度是正交的：status 是发版人的意图，file_missing 是磁盘事实。 %>

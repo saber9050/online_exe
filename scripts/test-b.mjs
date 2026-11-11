@@ -87,11 +87,18 @@ async function req(base, pathname, options = {}) {
   return { status: res.status, body, text }
 }
 
+/** 各平台的默认产物名：上传接口只收安装包，.bin 会被 filetypes.js 拒掉 */
+function defaultFilename(platform) {
+  if (platform === 'macos') return 'pkg.dmg'
+  if (platform === 'linux') return 'pkg.deb'
+  return 'pkg.exe'
+}
+
 /** 上传一个「文件」：元数据走 query，文件走 multipart（与方案约定一致） */
-function upload(base, { version, platform, arch, bytes, filename = 'pkg.bin', changelog = '' }) {
+function upload(base, { version, platform, arch, bytes, filename, changelog = '' }) {
   const form = new FormData()
   if (changelog) form.append('changelog', changelog)
-  form.append('file', new Blob([new Uint8Array(bytes)]), filename)
+  form.append('file', new Blob([new Uint8Array(bytes)]), filename || defaultFilename(platform))
 
   const qs = new URLSearchParams({ version, platform, arch }).toString()
   return req(base, `/api/releases?${qs}`, { method: 'POST', body: form })
@@ -204,6 +211,75 @@ async function main() {
   check('白名单外的平台组合 → 400', badCombo.status === 400)
   check('组合错误文案含具体组合', String(badCombo.body?.error || '').includes('windows10-arm64'))
 
+  // 7.1) 文件类型闸门：非安装包一律拒绝（图片 / 视频 / PDF / 无后缀 / 跨平台后缀）
+  const asImage = await upload(A.url, {
+    version: '3.1.0', platform: 'linux', arch: 'x64', bytes: pkg, filename: 'screenshot.png',
+  })
+  check('上传图片（.png）→ 400', asImage.status === 400, JSON.stringify(asImage.body))
+  check('图片被拒文案点名「图片」', String(asImage.body?.error || '').includes('图片'), asImage.body?.error)
+
+  const asVideo = await upload(A.url, {
+    version: '3.1.0', platform: 'windows10', arch: 'x64', bytes: pkg, filename: '演示.mp4',
+  })
+  check('上传视频（.mp4）→ 400', asVideo.status === 400, JSON.stringify(asVideo.body))
+
+  const asPdf = await upload(A.url, {
+    version: '3.1.0', platform: 'windows10', arch: 'x64', bytes: pkg, filename: '安装说明.pdf',
+  })
+  check('上传 PDF → 400 且 code=bad_filetype', asPdf.status === 400 && asPdf.body?.code === 'bad_filetype', JSON.stringify(asPdf.body))
+
+  const noExt = await upload(A.url, {
+    version: '3.1.0', platform: 'linux', arch: 'x64', bytes: pkg, filename: 'installer',
+  })
+  check('没有扩展名 → 400', noExt.status === 400, JSON.stringify(noExt.body))
+
+  // 白名单是全平台一致的：产物格式跨平台通用（Windows 打的 .zip 绿色包、macOS 临时给的
+  // .tar.gz 都是常态），按平台切分只会在正常上传时误拒，所以跨平台后缀也该放行。
+  const crossOs = await upload(A.url, {
+    version: '3.9.0', platform: 'windows10', arch: 'x64', bytes: pkg, filename: 'pkg.dmg',
+  })
+  check('macOS 的 .dmg 传到 Windows 组合也放行 → 201', crossOs.status === 201, JSON.stringify(crossOs.body))
+  if (crossOs.body?.id) await req(A.url, `/api/releases/${crossOs.body.id}`, { method: 'DELETE' })
+
+  // 后缀判定统一小写，`.AppImage` 这种通行写法不能因为大小写被挡
+  const asAppImage = await upload(A.url, {
+    version: '3.9.1', platform: 'windows7', arch: 'x64', bytes: pkg, filename: 'Runner-1.0.AppImage',
+  })
+  check('.AppImage（大写后缀）放行 → 201', asAppImage.status === 201, JSON.stringify(asAppImage.body))
+  if (asAppImage.body?.id) await req(A.url, `/api/releases/${asAppImage.body.id}`, { method: 'DELETE' })
+
+  const asTarGzWin = await upload(A.url, {
+    version: '3.9.2', platform: 'windows10', arch: 'x64', bytes: pkg, filename: 'portable-1.0.tar.gz',
+  })
+  check('Windows 组合的 .tar.gz 离线包放行 → 201', asTarGzWin.status === 201, JSON.stringify(asTarGzWin.body))
+  if (asTarGzWin.body?.id) await req(A.url, `/api/releases/${asTarGzWin.body.id}`, { method: 'DELETE' })
+
+  // 裸流协议（管理页走的这条路）同样要拦：文件名在 X-Filename 里
+  const rawMovie = await req(
+    A.url,
+    '/api/releases?version=3.2.0&platform=linux&arch=x64',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Filename': encodeURIComponent('movie.mkv'),
+      },
+      body: new Uint8Array(pkg),
+    },
+  )
+  check('裸流上传视频 → 400 且 code=bad_filetype', rawMovie.status === 400 && rawMovie.body?.code === 'bad_filetype', JSON.stringify(rawMovie.body))
+
+  const rawNoName = await req(
+    A.url,
+    '/api/releases?version=3.2.0&platform=linux&arch=x64',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(pkg),
+    },
+  )
+  check('裸流缺 X-Filename（无法判类型）→ 400', rawNoName.status === 400, JSON.stringify(rawNoName.body))
+
   const noFile = await req(
     A.url,
     '/api/releases?version=3.0.0&platform=linux&arch=x64',
@@ -212,8 +288,8 @@ async function main() {
   check('没有 file part → 400', noFile.status === 400, JSON.stringify(noFile.body))
 
   const twoFiles = new FormData()
-  twoFiles.append('file', new Blob([new Uint8Array([1, 2, 3])]), 'a.bin')
-  twoFiles.append('file', new Blob([new Uint8Array([4, 5, 6])]), 'b.bin')
+  twoFiles.append('file', new Blob([new Uint8Array([1, 2, 3])]), 'a.zip')
+  twoFiles.append('file', new Blob([new Uint8Array([4, 5, 6])]), 'b.zip')
   const multi = await req(A.url, '/api/releases?version=3.0.0&platform=linux&arch=x64', {
     method: 'POST',
     body: twoFiles,
@@ -365,11 +441,29 @@ async function main() {
   })
   check('在架版本重复上传仍 409（没把口子开太大）', dupAgain.status === 409, JSON.stringify(dupAgain.body))
 
-  // 同版本号可能换内容，下载侧不能再给 immutable，否则客户端一年不回头
+  // 同版本号可能换内容，下载侧不能再让代理/浏览器替服务端接走请求
   const dl = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
   const cc = dl.headers.get('cache-control') || ''
   await dl.arrayBuffer()
-  check('下载响应 Cache-Control 改为 no-cache（保留 ETag 协商）', cc.includes('no-cache'), cc)
+  check('下载响应 private + no-store（不用协商缓存，保证每次点击都到服务端）', cc.includes('no-store') && cc.includes('private'), cc)
+
+  // 下载计数口径：一次新下载 +1，Range 续传不重复计
+  async function downloadsOf(version, platform) {
+    const r = await req(A.url, '/api/releases')
+    const rel = (r.body?.releases || []).find((x) => x.version === version && x.platform === platform)
+    return rel ? rel.downloads : -1
+  }
+  check('直链下载计一次', (await downloadsOf('1.3.0', 'windows10')) === 1, String(await downloadsOf('1.3.0', 'windows10')))
+  await (await fetch(`${A.url}/dl/1.3.0/windows10-x64`)).arrayBuffer()
+  check('再下一次 → 2', (await downloadsOf('1.3.0', 'windows10')) === 2, String(await downloadsOf('1.3.0', 'windows10')))
+  await (await fetch(`${A.url}/dl/1.3.0/windows10-x64`, { headers: { Range: 'bytes=100-' } })).arrayBuffer()
+  check('Range 续传不重复计数', (await downloadsOf('1.3.0', 'windows10')) === 2, String(await downloadsOf('1.3.0', 'windows10')))
+  const statRes = await req(A.url, '/api/stats')
+  check(
+    'GET /api/stats 返回该记录的计数（管理页轮询用）',
+    statRes.status === 200 && statRes.body?.counts?.[up1.body.id] === 2,
+    JSON.stringify(statRes.body).slice(0, 120),
+  )
 
   // ════════════════════════════════════════════════════════════════
   // 场景三：file_missing 记录可重传且沿用原 id（需重启触发对账）
@@ -379,10 +473,20 @@ async function main() {
   const keepId = otherPlatform.body.id // windows7-x64 1.3.0
   const keepPath = path.join(dataA, 'releases', '1.3.0', 'windows7-x64', 'package.bin')
   await fs.unlink(keepPath) // 手工删文件，模拟磁盘意外丢失
+  // 计数落盘是 inc 后 1 秒的兜底计时器；Windows 上 child.kill('SIGTERM') 等于直接结束进程
+  // （没有优雅退出），所以这里等它一下，否则测的是「刚下完就强杀」而不是「落盘是否生效」
+  await new Promise((r) => setTimeout(r, 1200))
   await A.stop()
 
   const A2 = startServer({ dataDir: dataA, port: 19081 })
   check('重启成功（对账在启动阶段跑）', await waitReady(A2.url))
+
+  // 计数必须活过重启：原来只靠 30 秒定时器落盘，kill 一下就全丢
+  const afterRestart = await req(A2.url, '/api/releases')
+  const dlRow = (afterRestart.body?.releases || []).find(
+    (r) => r.version === '1.3.0' && r.platform === 'windows10',
+  )
+  check('重启后下载计数仍是 2（落盘 + 启动加载生效）', dlRow?.downloads === 2, String(dlRow?.downloads))
 
   const missingList = await req(A2.url, '/api/releases?status=missing')
   check(
@@ -553,7 +657,7 @@ async function main() {
   const init = await req(D.url, `/api/uploads?${cqs}`, {
     method: 'POST',
     headers: {
-      'X-Filename': encodeURIComponent('分片包.bin'),
+      'X-Filename': encodeURIComponent('分片包.deb'),
       'X-Changelog': encodeURIComponent('第一行\n第二行'),
     },
   })
@@ -603,12 +707,36 @@ async function main() {
   check('complete → 201', done.status === 201, JSON.stringify(done.body).slice(0, 120))
   check('分片拼出来的 sha256 与源一致', done.body?.sha256 === cwant, `${done.body?.sha256} vs ${cwant}`)
   check('size 等于源长度', done.body?.size === cbytes.length)
-  check('中文文件名解对', done.body?.filename === '分片包.bin', String(done.body?.filename))
+  check('中文文件名解对', done.body?.filename === '分片包.deb', String(done.body?.filename))
   check('多行 changelog 解对', done.body?.changelog === '第一行\n第二行', JSON.stringify(done.body?.changelog))
   check('提交后查会话 → 410', (await req(D.url, `/api/uploads/${id}`)).status === 410)
 
-  const dupInit = await req(D.url, `/api/uploads?${cqs}`, { method: 'POST' })
+  const dupInit = await req(D.url, `/api/uploads?${cqs}`, {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent('分片包.deb') },
+  })
   check('同版本再 init → 409 且带 existing', dupInit.status === 409 && Boolean(dupInit.body?.existing))
+
+  // 分片会话的文件名同样要过类型闸门：没给文件名就没法判类型，不能默认放行
+  const initPdf = await req(D.url, `/api/uploads?${cqs}`, {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent('需求文档.pdf') },
+  })
+  check('分片 init 传 PDF → 400 且 code=bad_filetype', initPdf.status === 400 && initPdf.body?.code === 'bad_filetype', JSON.stringify(initPdf.body))
+
+  const initNoName = await req(D.url, `/api/uploads?${cqs}`, { method: 'POST' })
+  check('分片 init 缺 X-Filename → 400', initNoName.status === 400, JSON.stringify(initNoName.body))
+
+  // 多段后缀：x.tar.gz 必须认作 .tar.gz，不能被切成 .gz 误拒
+  const tarQs = new URLSearchParams({
+    version: '3.1.0', platform: 'linux', arch: 'x64', total: '1000',
+  }).toString()
+  const initTar = await req(D.url, `/api/uploads?${tarQs}`, {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent('app-3.1.0.tar.gz') },
+  })
+  check('.tar.gz 视作一个后缀放行 → 201', initTar.status === 201, JSON.stringify(initTar.body))
+  await req(D.url, `/api/uploads/${initTar.body?.id}`, { method: 'DELETE' })
 
   const s2qs = new URLSearchParams({
     version: '3.0.0',
@@ -616,7 +744,10 @@ async function main() {
     arch: 'x64',
     total: '1000',
   }).toString()
-  const s2 = await req(D.url, `/api/uploads?${s2qs}`, { method: 'POST' })
+  const s2 = await req(D.url, `/api/uploads?${s2qs}`, {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent('setup.deb') },
+  })
   const aborted = await req(D.url, `/api/uploads/${s2.body.id}`, { method: 'DELETE' })
   check('abort → 204', aborted.status === 204)
   check('abort 后会话 410', (await req(D.url, `/api/uploads/${s2.body.id}`)).status === 410)
