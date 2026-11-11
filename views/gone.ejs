@@ -1,0 +1,16 @@
+<%- include('partials/head', { title: title, page: page, pageCss: pageCss }) %>
+
+<main class="wrap">
+  <section class="gone">
+    <div class="gone-mark">!</div>
+    <h1><%= heading %></h1>
+    <p class="gone-text"><%= text %></p>
+    <p class="gone-hint"><%= hint %></p>
+    <div class="gone-actions">
+      <a class="btn" href="/">刷新页面</a>
+      <a class="link gone-link" href="/#history">查看版本历史</a>
+    </div>
+  </section>
+</main>
+
+<%- include('partials/foot', { page: page, pageScript: pageScript }) %>

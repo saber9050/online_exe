@@ -134,4 +134,22 @@
   </section>
 </main>
 
+<%# 点「下载」时版本已被撤下的弹层。默认隐藏，由 download.js 探测到 404 / 410 后填文案打开。
+    为什么不直接跳到提示页：用户此刻正看着版本列表，跳走会丢掉「刚才点的是哪个版本」这条线索，
+    回来还得重新找；就地弹一个提示，刷新与否由用户自己决定。 %>
+<div class="dl-notice" id="dl-notice" hidden role="dialog" aria-modal="true" aria-labelledby="dl-notice-title">
+  <div class="dl-notice-mask" data-action="close"></div>
+  <div class="dl-notice-box">
+    <div class="dl-notice-mark">!</div>
+    <h2 id="dl-notice-title"></h2>
+    <p class="dl-notice-text" id="dl-notice-text"></p>
+    <p class="dl-notice-hint" id="dl-notice-hint"></p>
+    <div class="dl-notice-actions">
+      <button type="button" class="btn" data-action="reload">刷新页面</button>
+      <button type="button" class="btn btn-plain" data-action="close" id="dl-notice-close">知道了</button>
+    </div>
+  </div>
+</div>
+
+<script>window.__GONE__ = <%- JSON.stringify(goneCopy) %>;</script>
 <%- include('partials/foot', { page: page, pageScript: pageScript }) %>

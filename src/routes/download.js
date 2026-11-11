@@ -4,33 +4,38 @@ import { catalog } from '../catalog/catalog.js'
 import { storage } from '../storage/storage.js'
 import { stats } from '../catalog/stats.js'
 import { PLATFORM_ARCH_SET } from '../constants.js'
+import { renderGone } from './pages/gone.js'
 
 /** @param {import('express').Request} req @param {import('express').Response} res */
 export async function downloadHandler(req, res, next) {
   // 段数必须严格校验：windows10-x64-extra 不能静默取前两段
   const parts = String(req.params.combo || '').split('-')
-  if (parts.length !== 2) return res.status(404).send('not found')
+  if (parts.length !== 2) return renderGone(req, res)
   const [platform, arch] = parts
   if (!PLATFORM_ARCH_SET.has(`${platform}-${arch}`)) {
-    return res.status(404).send('not found')
+    return renderGone(req, res)
   }
 
   const rel = catalog.find(req.params.version, platform, arch)
-  if (!rel) return res.status(404).send('not found')
+  if (!rel) return renderGone(req, res)
 
   // 只有 active 能下：墓碑（deleted）是版本号作废，已撤回（yanked）是发版人主动下架，
   // 两者都不该再被下载到。统一回 404 而不是 410，避免通过错误码反推出「这个版本存在过」。
-  if (rel.status !== 'active') return res.status(404).send('not found')
+  // 404 给的是提示内容而不是纯文本：用户多半停在「开着没刷新的下载页」上点旧链接，
+  // 需要他们看懂「版本已下架，去刷新」这件事，纯文本 not found 只会被当成平台故障。
+  if (rel.status !== 'active') return renderGone(req, res)
 
   const abs = storage.abs(rel.object_key)
   const exists = await fs.stat(abs).catch(() => null)
   if (!exists) {
-    return res.status(410).send('包文件缺失，请联系发版人重新上传')
+    return renderGone(req, res, 'missing')
   }
 
-  // 断点续传会发多个 Range 请求，只让「新下载」计数
+  // 断点续传会发多个 Range 请求，只让「新下载」计数。
+  // HEAD 同样不计：下载页点「下载」时会先发一次 HEAD 探测版本是否还在架，
+  // 若跟着计数，用户每点一次按钮就被记两遍（探测一次 + 真正下载一次）。
   const range = req.headers.range
-  if (!range || /^bytes=0-/.test(range)) stats.inc(rel.id)
+  if (req.method !== 'HEAD' && (!range || /^bytes=0-/.test(range))) stats.inc(rel.id)
 
   // IE11 不认 filename*，必须同时给 ASCII 回退
   const asciiFallback = rel.filename

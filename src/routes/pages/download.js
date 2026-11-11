@@ -4,6 +4,7 @@ import { stats } from '../../catalog/stats.js'
 import { PLATFORM_GROUPS, OS_FAMILIES, osFamilyOf } from '../../constants.js'
 import { compareVersion } from '../../semver.js'
 import { toReleaseDto } from '../dto.js'
+import { GONE_COPY } from './gone.js'
 
 export function renderDownload(req, res) {
   const groups = PLATFORM_GROUPS.map((g) => {
@@ -95,5 +96,8 @@ export function renderDownload(req, res) {
     historyTabs,
     historyTotal: scoped.length,
     activeOs,
+    // 点「下载」才发现版本已下架时的弹层文案。与直接打开直链的整页提示共用一份，
+    // 否则「已下架」的说法迟早会在两个页面之间漂移。
+    goneCopy: GONE_COPY,
   })
 }
