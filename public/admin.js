@@ -867,7 +867,8 @@
     if (f.platform !== 'all' && platform !== f.platform) return false
     if (f.status === 'all') return status !== 'deleted'
     if (f.status === 'stable') return status === 'active' && !beta
-    if (f.status === 'prerelease') return status === 'active' && beta
+    // 没有 prerelease 分支：管理页不再提供「预发布」筛选项（上传入口不区分渠道，
+    // 这一项永远筛出空列表）。接口层仍支持 status=prerelease，见 releases.js 的 STATUS_FILTERS。
     if (f.status === 'yanked') return status === 'yanked'
     if (f.status === 'missing') return status !== 'deleted' && missing
     if (f.status === 'deleted') return status === 'deleted'

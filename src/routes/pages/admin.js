@@ -9,13 +9,20 @@ import { PACKAGE_EXTS, PACKAGE_EXT_TEXT, PACKAGE_EXT_TEXT_COMPACT, ALL_PACKAGE_E
 import { compareVersion } from '../../semver.js'
 import { toReleaseDto } from '../dto.js'
 // 筛选用接口层同一份实现：两处各写一遍必然漂移（改了接口忘了页面，用户会看到两套口径）
-import { filterReleases, sortReleases, STATUS_VALUES } from '../releases.js'
+import { filterReleases, sortReleases } from '../releases.js'
+
+// 管理页下拉里真实提供的筛选项。**不含 prerelease**：
+// 上传入口不区分渠道，is_prerelease 只由版本号的 prerelease 段派生，
+// 实际发版流程里没有「预发布」这一步，这一项筛出来永远是空列表，留着只会让人以为漏了数据。
+// 接口层（GET /api/releases?status=prerelease）仍然支持，筛选能力没被删掉，只是页面上不摆出来。
+const PAGE_STATUS_VALUES = ['all', 'stable', 'yanked', 'missing', 'deleted']
 
 export async function renderAdmin(req, res, next) {
   try {
-    // 页面层的 status 是「URL 可手改」的输入，非法值必须回落而不是报错 —— 白屏比筛错严重
+    // 页面层的 status 是「URL 可手改」的输入，非法值必须回落而不是报错 —— 白屏比筛错严重。
+    // prerelease 也按非法值处理：否则下拉会显示「全部」而表格是预发布筛选，口径对不上。
     const statusRaw = String(req.query.status || 'all')
-    const status = STATUS_VALUES.includes(statusRaw) ? statusRaw : 'all'
+    const status = PAGE_STATUS_VALUES.includes(statusRaw) ? statusRaw : 'all'
     const platform = String(req.query.platform || 'all')
 
     const all = catalog.list()

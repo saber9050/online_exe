@@ -99,7 +99,6 @@
         <select name="status">
           <option value="all" <%= status === 'all' ? 'selected' : '' %>>全部（不含已删除）</option>
           <option value="stable" <%= status === 'stable' ? 'selected' : '' %>>正式</option>
-          <option value="prerelease" <%= status === 'prerelease' ? 'selected' : '' %>>预发布</option>
           <option value="yanked" <%= status === 'yanked' ? 'selected' : '' %>>已撤回</option>
           <option value="missing" <%= status === 'missing' ? 'selected' : '' %>>缺文件</option>
           <option value="deleted" <%= status === 'deleted' ? 'selected' : '' %>>已删除</option>
