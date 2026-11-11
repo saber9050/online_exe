@@ -26,6 +26,7 @@ import { enqueueWrite, writeAtomic, serialize } from '../catalog/persist.js'
 import { getFreeBytes, tryReserve, releaseReserve, getReservedBytes } from '../storage/reserve.js'
 import { parseVersion } from '../semver.js'
 import { PLATFORM_ARCH_SET } from '../constants.js'
+import { validatePackageName } from '../filetypes.js'
 import { toReleaseDto } from './dto.js'
 import { buildRecord, isVersionTaken, newId, newUploadId } from './record.js'
 import { clientIp, headerText, maxUploadBytes } from './http-helpers.js'
@@ -146,6 +147,14 @@ export async function initUpload(req, res) {
   const version = parsed.version
   const key = `${platform}|${arch}|${version}`
 
+  // 文件类型闸门放在最前：不合规的文件连会话都不建，客户端立刻拿到 400，
+  // 而不是陪着一条慢链路把几百 MB 传完再被拒。
+  const typeCheck = validatePackageName(filename)
+  if (!typeCheck.ok) {
+    log({ op: 'init', reason: 'bad_filetype', version, platform, arch, filename: filename || '' })
+    return res.status(400).json({ code: 'bad_filetype', error: typeCheck.error })
+  }
+
   // 与单包上传共用同一套查重 + 占位：分片会话进行中，同版本的单包上传也必须被挡住
   const existing = catalog.get(platform, arch, version)
   if (isVersionTaken(existing)) {
@@ -157,7 +166,11 @@ export async function initUpload(req, res) {
   }
   if (inflight.has(key)) {
     log({ op: 'init', reason: 'inflight', version, platform, arch })
-    return res.status(409).json({ error: '该版本正在上传（可能是上次中断的残留），请约 2 分钟后再试' })
+    // code 给前端识别用：管理页据此显示「释放上次残留」按钮，而不是让用户干等
+    return res.status(409).json({
+      code: 'inflight',
+      error: '该版本正在上传（可能是上次中断的残留），可稍后重试，或点「释放上次残留」立即解除占用',
+    })
   }
 
   // 磁盘预检：按整个文件一次性预留，中途不再算账
@@ -189,7 +202,7 @@ export async function initUpload(req, res) {
     version,
     platform,
     arch,
-    filename: filename || `package-${version}-${platform}-${arch}.bin`,
+    filename, // 已过 validatePackageName，必然非空且后缀合规
     changelog,
     ip,
     total,
@@ -292,10 +305,13 @@ export async function uploadChunk(req, res) {
   }
 }
 
-/** GET /api/uploads/:id — 客户端断线重连后查进度（也可用来做断点续传） */
+/** GET /api/uploads/:id — 客户端断线重连后查进度（也可用来做断点续传 / 暂停保活） */
 export function uploadStatus(req, res) {
   const sess = sessions.get(req.params.id)
   if (!sess) return gone(res)
+  // 暂停期间客户端会定时打这个接口当心跳：刷新 updatedAt，避免被闲置 GC 当成跑路回收。
+  // 只有 open 状态刷新；committing 已经在 rename 的路上，不该被续命。
+  if (sess.state === 'open') sess.updatedAt = Date.now()
   const missing = []
   for (let i = 0; i < sess.chunks; i++) if (!sess.done[i]) missing.push(i)
   return res.json({
@@ -404,6 +420,52 @@ export async function abortUpload(req, res) {
   if (sess.state === 'committing') return res.status(409).json({ error: '正在提交，无法取消' })
   log({ op: 'abort', id: sess.id, version: sess.version, received: sess.received, chunks: sess.chunks })
   await destroySession(sess)
+  return res.status(204).end()
+}
+
+/**
+ * DELETE /api/uploads?version=&platform=&arch=
+ * 按「平台 + 架构 + 版本」强制释放占用。
+ *
+ * 场景：上次上传异常结束（直接关页面、断网、进程被杀），会话与 inflight 占位还在，
+ * 同版本再次上传一直吃 409。正常刷新已由前端 pagehide 里的 DELETE /:id 处理，
+ * 这条是兜底：会话 id 已经丢了，只能按业务键释放。
+ */
+export async function abortUploadByKey(req, res) {
+  const parsed = parseVersion(req.query.version)
+  const platform = String(req.query.platform || '')
+  const arch = String(req.query.arch || '')
+  if (!parsed) return res.status(400).json({ error: '版本号格式不合法' })
+  const key = `${platform}|${arch}|${parsed.version}`
+
+  let hit = null
+  for (const s of sessions.values()) {
+    if (s.key === key) {
+      hit = s
+      break
+    }
+  }
+
+  if (hit) {
+    if (hit.state === 'committing') return res.status(409).json({ error: '正在提交，无法取消' })
+    log({
+      op: 'force_release',
+      id: hit.id,
+      version: hit.version,
+      platform,
+      arch,
+      received: hit.received,
+      chunks: hit.chunks,
+      by: 'key',
+    })
+    await destroySession(hit)
+    return res.status(204).end()
+  }
+
+  // 没有分片会话，只剩单包上传留下的占位（或已经自然结束）：一并清掉。
+  // 单包上传如果还在跑，提交阶段会再查一次重（DUPLICATE），不会写出两条记录。
+  const had = inflight.delete(key)
+  log({ op: 'force_release', version: parsed.version, platform, arch, session: false, had })
   return res.status(204).end()
 }
 

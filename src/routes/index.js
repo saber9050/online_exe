@@ -6,8 +6,9 @@ import { storage } from '../storage/storage.js'
 import { renderDownload } from './pages/download.js'
 import { renderAdmin } from './pages/admin.js'
 import { uploadHandler } from './upload.js'
-import { initUpload, uploadChunk, uploadStatus, completeUpload, abortUpload } from './uploads.js'
+import { initUpload, uploadChunk, uploadStatus, completeUpload, abortUpload, abortUploadByKey } from './uploads.js'
 import { downloadHandler } from './download.js'
+import { statsHandler } from './stats.js'
 import * as releases from './releases.js'
 
 export const router = Router()
@@ -38,8 +39,13 @@ router.get('/api/uploads/:id', uploadStatus)
 router.put('/api/uploads/:id/chunks', uploadChunk)
 router.post('/api/uploads/:id/complete', completeUpload)
 router.delete('/api/uploads/:id', abortUpload)
+// 按业务键（version+platform+arch）强制释放上次异常中断留下的占用
+router.delete('/api/uploads', abortUploadByKey)
 // 列表：支持 status / platform 筛选
 router.get('/api/releases', releases.listHandler)
+
+// 下载计数：管理页轮询它就地刷新「下载」列（整页刷新会把筛选和滚动位置丢掉）
+router.get('/api/stats', statsHandler)
 
 // 撤回 / 恢复：两组入口语义相同。
 // PATCH 是当前前端在用的形态；POST /yank、/unyank 是方案 7.4 冻结的形态（CI 可能照冻结表写）。

@@ -66,6 +66,8 @@
 | 12 | `PUT` | `/api/uploads/:id/chunks?offset=` | 传一片 | CIDR | ✅ |
 | 13 | `POST` | `/api/uploads/:id/complete` | 校验并提交 | CIDR | ✅ |
 | 14 | `DELETE` | `/api/uploads/:id` | 放弃会话，清 tmp | CIDR | ✅ |
+| 15 | `DELETE` | `/api/uploads?version=&platform=&arch=` | 按业务键强制释放上次中断残留的占位 | CIDR | ✅ |
+| 16 | `GET` | `/api/stats` | 各版本下载计数（管理页轮询刷新「下载」列） | CIDR | ✅ |
 
 ---
 
@@ -224,9 +226,9 @@ Content-Type: application/octet-stream
 | query | `platform` | ✅ | `windows7` / `windows10` / `macos` / `linux` |
 | query | `arch` | ✅ | `x64` / `arm64` / `ia32`，且必须落在 8 组白名单内 |
 | header | `Content-Type` | ✅ | 必须是 `multipart/form-data` 或 `application/octet-stream`，其余一律 `400` |
-| multipart | `file` | ✅ | **恰好一个**；超过 `MAX_UPLOAD_MB`（默认 800MB）→ `413` |
+| multipart | `file` | ✅ | **恰好一个**；超过 `MAX_UPLOAD_MB`（默认 800MB）→ `413`；`filename` 后缀须过白名单（见 5.8） |
 | multipart | `changelog` | | 多行文本，`fieldSize` 上限 64KB |
-| header | `X-Filename` | | 裸流专用；**必须 `encodeURIComponent`**（HTTP 头只吃 ASCII）。缺省为 `package-<version>-<platform>-<arch>.bin` |
+| header | `X-Filename` | 裸流 ✅ | **必填且必须 `encodeURIComponent`**（HTTP 头只吃 ASCII）；后缀须过白名单（见 5.8）。空值/缺省一律 `400` —— 没有后缀就无法判断是不是安装包，不能默认放行 |
 | header | `X-Changelog` | | 裸流专用；同样要 `encodeURIComponent`。整个请求头上限 16KB，管理页限制在编码后 8000 字符内 |
 | header | `Content-Length` | 建议 | 有值时做空间预检 + 裸流的单包上限预检；chunked 时跳过预检，靠写入期计数兜底（超限同样 `413`，不会写脏盘） |
 
@@ -289,6 +291,7 @@ Body 是一条 Release DTO（**不含** `downloads`）：
 | `400` | `一次只能上传一个文件` | 两个 `file` part |
 | `400` | `字段数超出限制` | field 数 > 10 |
 | `400` | `请求中没有文件，请用 file 字段上传` | 没有 `file` part |
+| `400` | `不允许上传图片文件（.png），这不是安装包。…` + `code:"bad_filetype"` | 后缀不在白名单内（见 5.8） |
 | `409` | `<version> / <platform> / <arch> 已存在，请改用新版本号` + `existing` | 同步查重命中 |
 | `409` | `该版本正在上传，请稍后再试` | `inflight` 占位 |
 | `413` | `文件超过单包上限 800MB` | 超过 `MAX_UPLOAD_MB` |
@@ -364,7 +367,13 @@ CI 里跑的是 Linux，用 sh 版（见 §12）。
 
 失败/放弃  DELETE /api/uploads/:id → 204（立刻清 tmp 和占位，不用等 GC）
 断线重连  GET    /api/uploads/:id → { received, chunks, missing:[...], expiresInMs }
+释放残留  DELETE /api/uploads?version=&platform=&arch= → 204
+          会话 id 已经丢了（关页面 / 断网 / 进程被杀）时按业务键清占位；
+          管理页在 init 收到 409 `code:"inflight"` 后给「释放上次残留」按钮调这条
 ```
+
+> `GET /api/uploads/:id` 兼作暂停心跳：命中 open 会话会把闲置计时重置，
+> 管理页暂停期间每 60s 调一次，避免暂停太久被闲置 GC 回收。
 
 **关键约束**
 
@@ -383,6 +392,31 @@ CI 里跑的是 Linux，用 sh 版（见 §12）。
 
 **sha256 为什么在最后算**：分片乱序到达，没法边传边累加，只能 commit 时整读一遍。
 400MB 在 2C 的 ECS 上约 2 秒，一次的事情，不影响上传速度。
+
+### 5.8 文件类型限制（只收安装包）
+
+判定**只看文件名后缀**，白名单在 `src/filetypes.js`，两条上传路径（`POST /api/releases` 与
+`POST /api/uploads` 的 init）共用同一份。不通过一律 `400` + `code:"bad_filetype"`，
+且在**建立会话/读 body 之前**就拒，不让客户端白传几百 MB。
+
+白名单**全平台通用**，不再按平台切分——产物格式跨平台是常态（Windows 打的 `.zip` 绿色包、
+macOS 临时给的 `.tar.gz`、Linux 回退的 `.zip`），按平台绑只会在正常上传时误拒。
+平台只决定这条记录归属哪个下载区块，不决定能不能传。
+
+| 是否允许 | 后缀 |
+|---|---|
+| ✅ 安装包 / 可分发产物 | `.exe` `.msi` `.msix` `.msixbundle` `.appx` `.dmg` `.pkg` `.deb` `.rpm` `.AppImage` `.run` `.sh` `.tar.gz` `.tar.xz` `.tgz` `.zip` `.7z` |
+| ❌ 图片 | `.png` `.jpg` `.jpeg` `.gif` `.bmp` `.webp` `.svg` `.ico` `.tif` `.tiff` `.heic` `.avif` `.psd` `.raw` |
+| ❌ 视频 / 音频 | `.mp4` `.mkv` `.mov` `.avi` `.webm` … / `.mp3` `.wav` `.flac` … |
+| ❌ 文档 | `.pdf` `.docx` `.xlsx` `.pptx` `.txt` `.md` `.csv` … |
+| ❌ 源码 / 网页 | `.js` `.ts` `.py` `.java` `.html` `.css` `.json` `.xml` … |
+| ❌ 手机包 / 镜像 | `.apk` `.ipa` `.aab` / `.iso` `.img` `.vhd` `.vmdk` … |
+
+其余未列出的后缀同样拒绝。后缀判定统一小写，`.AppImage` / `.EXE` 这类写法照样放行。
+
+> 为什么不用 `Content-Type` 判断：裸流没有可信的类型头，multipart 的类型头也是客户端随便写的；
+> 为什么不用黑名单：黑名单永远漏新格式，白名单漏了补一条就行。
+> 后缀按「多段优先」解析（`x.tar.gz` 认作 `.tar.gz`，不会被切成 `.gz` 误拒）。
 
 ---
 
@@ -479,7 +513,9 @@ curl.exe -i -X DELETE "http://127.0.0.1:8080/api/releases/$id"
 
 但「留痕」不等于「永久封号」——删除的语义是「这个版本作废、东西没了」，既然文件都没了，再拿「已存在」挡住重新上传同一个版本号只会逼用户去改版本号。所以查重放行 `status=deleted` 的记录（见 §5.3）。
 
-配套改动：`/dl/` 的缓存从 `Cache-Control: immutable` 退成 `no-cache` + ETag。否则删掉重发之后，浏览器一年内都不会回源，用户会「下了但程序没变」，且从现象上查不到原因。
+配套改动：`/dl/` 的缓存从 `Cache-Control: immutable` 一路退到现在的 `private, no-store`。
+两个原因：① 删掉重发之后 URL 内容会变，浏览器缓存一年会让用户「下了但程序没变」；
+② 下载次数只在服务端计数，被浏览器或内网代理缓存住的请求根本到不了 Node，统计永远是 0。
 
 墓碑默认不出现在 `GET /api/releases`（`all` 已排除），用 `status=deleted` 查；一旦用同版本号重传成功，它就从「已删除」里消失、回到 `active`。
 

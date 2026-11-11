@@ -5,6 +5,7 @@ import { catalog } from '../../catalog/catalog.js'
 import { stats } from '../../catalog/stats.js'
 import { storage } from '../../storage/storage.js'
 import { PLATFORM_GROUPS } from '../../constants.js'
+import { PACKAGE_EXTS, PACKAGE_EXT_TEXT, PACKAGE_EXT_TEXT_COMPACT, ALL_PACKAGE_EXTS } from '../../filetypes.js'
 import { compareVersion } from '../../semver.js'
 import { toReleaseDto } from '../dto.js'
 // 筛选用接口层同一份实现：两处各写一遍必然漂移（改了接口忘了页面，用户会看到两套口径）
@@ -97,6 +98,12 @@ export async function renderAdmin(req, res, next) {
       coverage,
       suggestions,
       groups: PLATFORM_GROUPS,
+      // 与后端同一个白名单：前端 accept / 即时校验不该另写一份，否则改一处必漂移。
+      // 后缀是全平台通用的，所以只传一份列表，不再按平台切分。
+      packageExts: PACKAGE_EXTS,
+      packageExtText: PACKAGE_EXT_TEXT,
+      packageExtCompact: PACKAGE_EXT_TEXT_COMPACT,
+      allPackageExts: ALL_PACKAGE_EXTS,
       maxUploadMb: cfg.maxUploadMb,
       keepPerPlatform: cfg.keepPerPlatform,
     })

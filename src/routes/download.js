@@ -42,14 +42,14 @@ export async function downloadHandler(req, res, next) {
     `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(rel.filename)}`,
   )
   res.setHeader('ETag', `"${rel.sha256}"`)
-  // 缓存策略：no-cache = 可以存，但每次必须回源校验（ETag 是内容 sha256，未变就 304，几乎零成本）。
-  //
-  // 为什么不用原来的 `max-age=31536000, immutable`：
-  // 管理页允许「删除某版本后重新上传同一版本号」（墓碑不再挡重发），
-  // 这时同一个 /dl URL 会对应新内容。immutable 会让浏览器一年内不再发请求，
-  // 用户只会报「我下了但程序没变」，而且从现象上根本查不到原因。
-  // 内网带宽不是瓶颈，牺牲「完全不发请求」换「永远拿到当前那份」是划算的。
-  res.setHeader('Cache-Control', 'public, no-cache')
+  // 缓存策略：private + no-store。这不是性能参数，是「计数正确性」参数。
+  //   - public 会被内网 nginx / 公司代理缓存，第二次点「下载」根本没到 Node，
+  //     管理端的下载次数永远是 0 —— 这正是「下载了但统计不到」的典型现场；
+  //   - no-store 连协商缓存都不走，每次点击都实打实经过服务端，点一次算一次。
+  // 代价是不再有 304（每次重下整包）。内网带宽不是瓶颈，统计可信更重要；
+  // 而且管理端允许「删掉某版本后重传同版本号」，同一个 URL 换内容时
+  // no-store 也不会出现「下了但程序没变」。
+  res.setHeader('Cache-Control', 'private, no-store')
 
   res.sendFile(
     abs,
