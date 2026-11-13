@@ -1024,6 +1024,44 @@
       })
   }
 
+  /**
+   * 校验磁盘上的包是否还等于上传时那份（服务端重算 sha256，几百 MB 要等一两秒）。
+   * 为什么要人工点：整包重算会把磁盘 IO 翻倍，不适合挂在每次下载上。
+   * 什么时候该点：怀疑磁盘坏、文件被人手工换过、用户反馈「装不上 / 包不完整」。
+   */
+  function verifyRelease(id, btn) {
+    var label = btn.textContent
+    btn.disabled = true
+    btn.textContent = '校验中…'
+    fetchJson('/api/releases/' + encodeURIComponent(id) + '/integrity')
+      .then(function (d) {
+        if (d.ok) {
+          alert('校验通过\n\n' + d.version + ' ' + d.combo + '\n' +
+            '大小 ' + fmtBytes(d.size_on_disk) + '（与记录一致）\n' +
+            'sha256 ' + d.expected)
+          return
+        }
+        if (d.reason === 'missing') {
+          alert('文件已不存在\n\n' + d.version + ' ' + d.combo +
+            '\n请用「重新上传」补齐同版本文件。')
+          return
+        }
+        alert('校验不通过\n\n' + d.version + ' ' + d.combo + '\n' +
+          '记录大小 ' + fmtBytes(d.size_recorded) + ' / 磁盘实际 ' + fmtBytes(d.size_on_disk) + '\n' +
+          '记录 sha256 ' + d.expected + '\n' +
+          '实际 sha256 ' + d.actual + '\n\n' +
+          '这份文件已不能下载（下载直链会直接拒绝）。\n' +
+          '处理办法：删除该版本后重新上传同一版本号。')
+      })
+      .catch(function (err) {
+        alert('校验失败：' + err.message)
+      })
+      .then(function () {
+        btn.disabled = false
+        btn.textContent = label
+      })
+  }
+
   document.addEventListener('click', function (e) {
     var btn = closestAction(e.target)
     if (!btn) return
@@ -1044,6 +1082,7 @@
 
     if (action === 'yank') patchStatus(id, 'yanked', btn)
     else if (action === 'restore') patchStatus(id, 'active', btn)
+    else if (action === 'verify') verifyRelease(id, btn)
     else if (action === 'delete') {
       deleteRelease(
         id,

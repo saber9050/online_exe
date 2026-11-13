@@ -140,6 +140,12 @@
         if (!openNotice('missing')) startDownload(url);
         return;
       }
+      // 500 可能是「包文件损坏」，也可能是服务端别的问题。只认 X-Dl-Status 这个标记，
+      // 没标记的一律照常跳转，让服务端页面自己说明。
+      if (code === 500 && xhr.getResponseHeader('X-Dl-Status') === 'corrupt') {
+        if (!openNotice('corrupt')) startDownload(url);
+        return;
+      }
       // 200 / 206 以及探测不出来的情况：交给浏览器，服务端仍有整页兜底
       startDownload(url);
     }
@@ -173,6 +179,15 @@
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     if (typeof e.button === 'number' && e.button !== 0) return;
 
+    // 校验码按钮先处理：它不是链接，走不到下面的 findDownloadLink
+    var shaBtn = findShaButton(e.target || e.srcElement);
+    if (shaBtn) {
+      if (e.preventDefault) e.preventDefault();
+      else e.returnValue = false;
+      copySha(shaBtn);
+      return;
+    }
+
     var a = findDownloadLink(e.target || e.srcElement);
     if (!a) return;
 
@@ -190,6 +205,64 @@
     }
 
     probe(url);
+  }
+
+  // ── 校验码复制 ───────────────────────────────────────────────
+  // 「下载下来的文件是不是坏的」在服务端判断不了（断流、U 盘拷贝、代理截断都发生在
+  // 服务端视野之外），只能由用户拿页面上的 sha256 自己核一遍。所以这个值要能一键复制：
+  // Windows 上 `certutil -hashfile 包.exe SHA256`，macOS/Linux 上 `shasum -a 256`。
+  // 复制用两步：首选 Clipboard API，失败退回 textarea + execCommand（IE11 只有后者）。
+
+  function findShaButton(node) {
+    while (node && node.nodeType === 1) {
+      if (node.getAttribute && node.getAttribute('data-sha')) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {
+        /* 非安全上下文（http 内网）会抛，退回下面的方案 */
+      }
+    }
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', 'readonly');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch (e2) {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  function copySha(btn) {
+    var full = btn.getAttribute('data-sha') || '';
+    if (!full) return;
+    var label = btn.getAttribute('data-label') || btn.innerHTML;
+
+    var ok = copyText(full);
+    btn.className += ' copied';
+    btn.innerHTML = ok ? '已复制' : '复制失败';
+    // 失败时把完整值摊在按钮上，让用户还能手动选中复制
+    if (!ok) btn.innerHTML = full;
+
+    setTimeout(function () {
+      btn.className = btn.className.replace(/\s*copied/, '');
+      btn.innerHTML = label;
+    }, ok ? 1200 : 4000);
   }
 
   function onNoticeClick(e) {

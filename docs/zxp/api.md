@@ -42,7 +42,7 @@
 | `409` | 版本已存在 / 正在上传 / 状态不允许 | `POST`、`PATCH`、`DELETE` |
 | `413` | 超过 `MAX_UPLOAD_MB` | `POST` |
 | `499` | 客户端主动断开（Nginx 惯例码，**客户端自身看不到**） | `POST` |
-| `500` | 建目录失败 / 写盘失败 / 写 JSON 失败 | `POST`、`PATCH`、`DELETE` |
+| `500` | 建目录失败 / 写盘失败 / 写 JSON 失败 / 包文件损坏（下载时） | `POST`、`PATCH`、`DELETE`、`GET /dl/*` |
 | `503` | 存储不可用（写盘探针失败） | `/healthz` |
 | `507` | 磁盘空间不足 | `POST` |
 
@@ -68,6 +68,7 @@
 | 14 | `DELETE` | `/api/uploads/:id` | 放弃会话，清 tmp | CIDR | ✅ |
 | 15 | `DELETE` | `/api/uploads?version=&platform=&arch=` | 按业务键强制释放上次中断残留的占位 | CIDR | ✅ |
 | 16 | `GET` | `/api/stats` | 各版本下载计数（管理页轮询刷新「下载」列） | CIDR | ✅ |
+| 17 | `GET` | `/api/releases/:id/integrity` | 重算磁盘文件 sha256，与上传记录比对（管理页「校验」） | CIDR | ✅ |
 
 ---
 
@@ -624,6 +625,47 @@ curl.exe -s -X DELETE http://127.0.0.1:8080/api/orphans
 
 `file_missing = true` 与上面三态**互相独立**：一个 `yanked` 记录也可能缺文件。UI 上两个标记各自渲染。
 
+### 10.3 完整性校验
+
+「文件有没有坏」分三层，各有各的盲区，缺一层都会漏：
+
+| 层 | 触发时机 | 成本 | 能发现 |
+|---|---|---|---|
+| 上传时算 sha256 | 每次上传 | 边收边算，零额外 IO | 上传链路本身传坏（对比客户端本地 hash 才看得出） |
+| 下载前对大小 | 每次下载 | 一次 `stat` | 截断、被别的文件覆盖、搬运没传完 → **直接 500，不发坏包** |
+| `GET /api/releases/:id/integrity` | 人工按需 | 整读一遍文件（400MB ≈ 1~2s） | 大小一致但内容被改（磁盘坏道、手工替换） |
+
+**`GET /api/releases/:id/integrity`**
+
+| 项 | 值 |
+|---|---|
+| 鉴权 | CIDR |
+| 输出 | `{ ok, reason, id, version, combo, filename, expected, actual, size_recorded, size_on_disk, size_ok, hash_ok, elapsed_ms }` |
+| `reason` | `null`（一致）/ `size_mismatch` / `hash_mismatch` / `missing` |
+| `404` | 记录不存在 |
+| `409` | 该版本已删除（墓碑没有可比对的文件） |
+
+为什么要人工点：重算一次要整读几百 MB，挂在下载路径上等于把每个下载的磁盘 IO 翻倍；
+日常下载只做零成本的大小检查就够了。
+
+**客户端侧**（网络断流、代理截断这类服务端看不见的损坏，只能客户端自己验）：
+
+- 下载响应头带 `X-Checksum-Sha256: <hash>`，`ETag` 也是同一个值；
+- `GET /dl/:version/:combo.sha256` 回一行 `<hash>  <文件名>`，`sha256sum -c` 可直接吃；
+- 下载页每条版本都有「校验码」，点一下复制完整 sha256。
+
+```bash
+curl -O http://host:8080/dl/1.3.0/windows10-x64.sha256
+sha256sum -c CoreRunner-1.3.0-win10-x64.exe.sha256
+```
+
+```powershell
+certutil -hashfile .\CoreRunner-1.3.0-win10-x64.exe SHA256
+```
+
+> `.sha256` 端点故意**不做大小校验**：文件已经坏了的时候，用户最先需要的是「应该是什么值」，
+> 而不是一起被 500 挡住。所以它只要求「记录在架 + 文件还在」。
+
 ---
 
 ## 11. 错误码排错表
@@ -637,6 +679,7 @@ curl.exe -s -X DELETE http://127.0.0.1:8080/api/orphans
 | `413` | `MAX_UPLOAD_MB` | 包超过 800MB |
 | `500` 创建目录失败 | `ls -ld /srv/online_exe/data` | 宿主机目录属主不是 `1000:1000`，容器内 `node` 用户无写权限 |
 | `500` 写盘失败 | `df -h` / `docker logs` | 磁盘满、inode 满、挂载只读 |
+| `500` 下载页「包文件已损坏」 | `docker logs` 里 `[download] reason=size_mismatch` | 磁盘文件与记录大小不符（截断/被覆盖）。删掉该版本重传同版本号，或从备份恢复文件 |
 | `503` `/healthz` | 同上 | `DATA_DIR` 不可写；容器会被标 unhealthy |
 | `507` | `df -h` + 并发数 | 8 个 400MB 同时传要预留 3.5GB |
 | 请求挂住不返回 | `docker logs` 有没有 `UnhandledPromiseRejection` | 正常情况下不会；出现就是失败路径漏了 `.catch`，按 bug 处理 |

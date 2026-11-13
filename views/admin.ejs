@@ -169,6 +169,14 @@
                     <button type="button" class="btn btn-sm" data-action="restore" data-id="<%= r.id %>">恢复</button>
                   <% } %>
                 <% } %>
+                <%# 校验：重算磁盘文件的 sha256 与上传记录比对。
+                    只给「文件还在」的行——缺文件的行点了也只会得到「不存在」，
+                    那种情况该走的是「重新上传」。 %>
+                <% if (!r.file_missing) { %>
+                  <button type="button" class="btn btn-sm" data-action="verify" data-id="<%= r.id %>"
+                    data-version="<%= r.version %>" data-combo="<%= r.comboLabel %>"
+                    title="重算 sha256，确认磁盘上的包和上传记录一致">校验</button>
+                <% } %>
                 <button type="button" class="btn btn-sm btn-danger" data-action="delete"
                   data-id="<%= r.id %>" data-version="<%= r.version %>"
                   data-combo="<%= r.comboLabel %>">删除</button>

@@ -2,6 +2,9 @@
 // 归属：成员 B（管理页接口层）。磁盘结构与落盘由成员 A 的 src/catalog/catalog.js、src/catalog/persist.js 负责，
 // 本文件不允许自己拼路径、自己写 releases.json。
 import { cfg } from '../config.js'
+import fs from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { catalog } from '../catalog/catalog.js'
 import { storage } from '../storage/storage.js'
 import { stats } from '../catalog/stats.js'
@@ -228,6 +231,96 @@ export async function orphanDeleteHandler(req, res, next) {
     res.json(await clearOrphans())
   } catch (e) {
     // 404 / 400 由 src/catalog/orphan.js 带 status 抛出，统一错误中间件按 status 输出
+    next(e)
+  }
+}
+
+/** 整读一个文件的 sha256（流式，不把 400MB 读进内存） */
+function hashFile(abs) {
+  return new Promise((resolve, reject) => {
+    const h = createHash('sha256')
+    const s = createReadStream(abs)
+    s.on('error', reject)
+    s.on('data', (chunk) => h.update(chunk))
+    s.on('end', () => resolve(h.digest('hex')))
+  })
+}
+
+/**
+ * GET /api/releases/:id/integrity —— 校验磁盘上那份文件是否还等于上传时那份。
+ *
+ * 为什么按需做，而不是放在下载路径上：
+ * 重算一次要整读几百 MB，放在下载链路等于把每个下载的磁盘 IO 翻倍；
+ * 而真正的日常下载只需要「大小对不上就拒发」这条零成本检查（见 download.js）。
+ *
+ * 两个维度分开报：
+ *   · size_ok —— 记录里的字节数与磁盘字节数一致（截断、被覆盖会在这里露出来）
+ *   · hash_ok —— 重算的 sha256 与上传时一致（大小相同但内容被改，只有它能发现）
+ */
+export async function integrityHandler(req, res, next) {
+  try {
+    const rel = catalog.getById(req.params.id)
+    if (!rel) return res.status(404).json({ error: '版本记录不存在' })
+    if (rel.status === 'deleted') {
+      return res.status(409).json({ error: '该版本已删除，没有可比对的文件' })
+    }
+
+    const abs = storage.abs(rel.object_key)
+    const st = await fs.stat(abs).catch(() => null)
+    if (!st) {
+      return res.json({
+        ok: false,
+        reason: 'missing',
+        id: rel.id,
+        version: rel.version,
+        combo: `${rel.platform}-${rel.arch}`,
+        filename: rel.filename,
+        expected: rel.sha256,
+        actual: null,
+        size_recorded: rel.size,
+        size_on_disk: null,
+        size_ok: false,
+        hash_ok: false,
+      })
+    }
+
+    const started = Date.now()
+    const actual = await hashFile(abs)
+    const sizeOk = st.size === rel.size
+    const hashOk = actual === rel.sha256
+
+    if (!hashOk) {
+      console.warn(
+        '[integrity] ' +
+          JSON.stringify({
+            reason: 'hash_mismatch',
+            id: rel.id,
+            version: rel.version,
+            combo: `${rel.platform}-${rel.arch}`,
+            expected: rel.sha256,
+            actual,
+            size_recorded: rel.size,
+            size_on_disk: st.size,
+          }),
+      )
+    }
+
+    res.json({
+      ok: sizeOk && hashOk,
+      reason: sizeOk && hashOk ? null : sizeOk ? 'hash_mismatch' : 'size_mismatch',
+      id: rel.id,
+      version: rel.version,
+      combo: `${rel.platform}-${rel.arch}`,
+      filename: rel.filename,
+      expected: rel.sha256,
+      actual,
+      size_recorded: rel.size,
+      size_on_disk: st.size,
+      size_ok: sizeOk,
+      hash_ok: hashOk,
+      elapsed_ms: Date.now() - started,
+    })
+  } catch (e) {
     next(e)
   }
 }

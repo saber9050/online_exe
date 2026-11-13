@@ -470,6 +470,51 @@ async function main() {
     JSON.stringify(statRes.body).slice(0, 120),
   )
 
+  // ── 完整性：校验码端点 / 响应头 / 大小不符时拒发 ──────────────────
+  const expectedSha = sha256(rePkg)
+  const sumRes = await fetch(`${A.url}/dl/1.3.0/windows10-x64.sha256`)
+  const sumText = (await sumRes.text()).trim()
+  check(
+    '.sha256 端点 → 200 且正好一行「hash  文件名」（sha256sum -c 可直接吃）',
+    sumRes.status === 200 && sumText === `${expectedSha}  ${reup.body?.filename}`,
+    sumText,
+  )
+
+  // HEAD 不计数，用来看响应头里的校验码
+  const headRes = await fetch(`${A.url}/dl/1.3.0/windows10-x64`, { method: 'HEAD' })
+  check(
+    '下载响应头带 X-Checksum-Sha256（脚本不用再单独取一次）',
+    headRes.headers.get('x-checksum-sha256') === expectedSha,
+    String(headRes.headers.get('x-checksum-sha256')),
+  )
+
+  const okInt = await req(A.url, `/api/releases/${id1}/integrity`)
+  check(
+    '完整性校验：文件正常 → ok:true，重算 hash 与记录一致',
+    okInt.status === 200 && okInt.body?.ok === true && okInt.body?.actual === expectedSha,
+    JSON.stringify(okInt.body).slice(0, 140),
+  )
+
+  // 把文件截短，模拟「搬运没传完 / 磁盘出问题」：直链必须拒发，校验必须报出来
+  const goodBytes = await fs.readFile(finalPath)
+  await fs.writeFile(finalPath, goodBytes.subarray(0, 1000))
+  const corruptDl = await fetch(`${A.url}/dl/1.3.0/windows10-x64`)
+  const corruptHtml = await corruptDl.text()
+  check('大小与记录不符 → 直链 500 而不是把坏包发出去', corruptDl.status === 500, String(corruptDl.status))
+  check('拒发页面说明「包文件已损坏」', corruptHtml.includes('包文件已损坏'))
+
+  const badInt = await req(A.url, `/api/releases/${id1}/integrity`)
+  check(
+    '完整性校验：截断后 → ok:false + size_mismatch',
+    badInt.status === 200 && badInt.body?.ok === false && badInt.body?.reason === 'size_mismatch',
+    JSON.stringify(badInt.body).slice(0, 140),
+  )
+  check('校验结果同时给出记录值与磁盘实际值', badInt.body?.size_recorded === goodBytes.length && badInt.body?.size_on_disk === 1000, JSON.stringify(badInt.body).slice(0, 140))
+
+  // 复原，后面的重启 / 计数断言依赖这个文件可用
+  await fs.writeFile(finalPath, goodBytes)
+  check('复原后直链恢复 200', (await fetch(`${A.url}/dl/1.3.0/windows10-x64`, { method: 'HEAD' })).status === 200)
+
   // ════════════════════════════════════════════════════════════════
   // 场景三：file_missing 记录可重传且沿用原 id（需重启触发对账）
   // ════════════════════════════════════════════════════════════════

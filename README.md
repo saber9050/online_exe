@@ -34,6 +34,10 @@
 
 - 按平台分块 + 锚点导航（JS 禁用也能用），Win7 / Win10 是两个独立区块
 - `sendFile` 原生支持 Range，断点续传、条件请求（ETag = 内容 sha256）
+- 完整性三道卡：上传时算 sha256 → 每次下载前对文件大小（不符直接拒发，返回「包文件已损坏」）
+  → 管理端「校验」按需重算整包 sha256
+- 客户端可自查：页面上每条版本有「校验码」（点一下复制完整 sha256），
+  直链也带 `X-Checksum-Sha256` 响应头，另有 `/dl/:version/:combo.sha256` 可下载校验码文件
 - 缓存策略 `private, no-store`：不给浏览器/代理留缓存。下载次数靠服务端计数，
   一旦被内网 nginx 或公司代理缓存，第二次点击根本到不了 Node，统计就永远是 0
 
@@ -191,10 +195,35 @@ npm run seed
 | `POST` | `/api/releases/:id/yank` | 撤回（等价写法） |
 | `POST` | `/api/releases/:id/unyank` | 恢复（等价写法） |
 | `DELETE` | `/api/releases/:id` | 删除（墓碑，可重发同版本） |
+| `GET` | `/api/releases/:id/integrity` | 重算磁盘文件 sha256，与上传记录比对（管理页「校验」） |
 | `GET` | `/api/orphans` | 列出孤儿文件 |
 | `DELETE` | `/api/orphans` | 清空孤儿（带 `?path=` 则删单个） |
-| `GET` | `/dl/:version/:combo` | 下载直链，如 `/dl/1.3.0/windows10-x64`（每次请求都给计数 +1） |
+| `GET` | `/dl/:version/:combo` | 下载直链，如 `/dl/1.3.0/windows10-x64`（每次请求都给计数 +1，响应头带 `X-Checksum-Sha256`） |
+| `GET` | `/dl/:version/:combo.sha256` | 只回一行 `<sha256>  <文件名>`，`sha256sum -c` 可直接用 |
 | `GET` | `/api/stats` | 各版本下载计数 `{counts:{id:n}}`，管理页每 10 秒轮询它刷新「下载」列 |
+
+**怎么判断下载到的文件是不是坏的**
+
+服务端和客户端各管一半：
+
+| 环节 | 能发现什么 | 怎么看 |
+|---|---|---|
+| 下载前（服务端，零成本） | 磁盘文件和记录大小不一致（截断/被覆盖）→ 直接 500「包文件已损坏」，不会把坏包发出去 | 自动 |
+| 下完（客户端） | 传输中断、代理截断、U 盘拷贝出错 | 用页面上的校验码比对，见下面命令 |
+| 事后核查（管理端） | 大小相同但内容被改（只有重算 sha256 能发现） | 版本行点「校验」，几秒后弹出结论 |
+
+客户端自查（下完立刻比对，一致就说明文件完整）：
+
+```powershell
+# Windows：拿页面「校验码」复制到的值比对
+certutil -hashfile .\CoreRunner-1.3.0-win10-x64.exe SHA256
+```
+
+```bash
+# macOS / Linux：直接吃服务器给的那行
+curl -O http://10.20.3.10:8080/dl/1.3.0/windows10-x64.sha256
+sha256sum -c CoreRunner-1.3.0-win10-x64.exe.sha256   # 输出 OK 即完整
+```
 
 CI 上传示例：
 

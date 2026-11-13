@@ -67,6 +67,13 @@
               <div class="card-meta">大小 <b><%= fmtSize(a.latest.size) %></b></div>
               <div class="card-meta">更新 <b><%= fmtDate(a.latest.uploaded_at) %></b></div>
               <div class="card-meta dim">下载 <%= a.latest.downloads %> 次</div>
+              <%# 校验码：下载完可以自己核一遍有没有下坏。点击复制完整值，
+                  标题里也给了完整值，JS 失效时 hover 也能看到 %>
+              <div class="card-meta dim">SHA-256
+                <button type="button" class="sha" data-sha="<%= a.latest.sha256 %>"
+                  data-label="<%= String(a.latest.sha256 || '').slice(0, 12) %>…"
+                  title="点击复制完整校验码：<%= a.latest.sha256 %>"><%= String(a.latest.sha256 || '').slice(0, 12) %>…</button>
+              </div>
               <% if (a.latest.file_missing) { %>
                 <span class="btn btn-disabled">文件缺失</span>
               <% } else { %>
@@ -124,7 +131,11 @@
             <td><%= fmtSize(r.size) %></td>
             <td><%= fmtDate(r.uploaded_at) %></td>
             <td class="changelog"><%= r.changelog || '—' %></td>
-            <td><a class="link" href="<%= r.download_url %>">下载</a></td>
+            <td class="dl-cell">
+              <a class="link" href="<%= r.download_url %>">下载</a>
+              <button type="button" class="sha" data-sha="<%= r.sha256 %>" data-label="校验码"
+                title="复制 SHA-256：<%= r.sha256 %>">校验码</button>
+            </td>
           </tr>
           <% }) %>
         </tbody>

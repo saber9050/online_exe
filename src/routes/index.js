@@ -7,7 +7,7 @@ import { renderDownload } from './pages/download.js'
 import { renderAdmin } from './pages/admin.js'
 import { uploadHandler } from './upload.js'
 import { initUpload, uploadChunk, uploadStatus, completeUpload, abortUpload, abortUploadByKey } from './uploads.js'
-import { downloadHandler } from './download.js'
+import { downloadHandler, checksumHandler } from './download.js'
 import { statsHandler } from './stats.js'
 import * as releases from './releases.js'
 
@@ -57,9 +57,15 @@ router.post('/api/releases/:id/unyank', releases.unyankHandler)
 // 删除：墓碑式，记录保留、文件删除
 router.delete('/api/releases/:id', releases.deleteHandler)
 
+// 完整性校验：重算磁盘文件的 sha256，与上传时记录比对（管理页「校验」按钮）
+router.get('/api/releases/:id/integrity', releases.integrityHandler)
+
 // 孤儿文件（磁盘上有、记录里没有）：先看得见，才能判断该不该清
 router.get('/api/orphans', releases.orphanListHandler)
 router.delete('/api/orphans', releases.orphanDeleteHandler)
 
 // ── 下载直链（成员 A）────────────────────────────────────
+// 校验码必须排在直链之前：`/:combo.sha256` 里的 `.sha256` 是字面前缀，
+// 顺序反了会被 `/:combo` 先吃掉（combo 变成 "windows10-x64.sha256"，段数校验直接 404）。
+router.get('/dl/:version/:combo.sha256', checksumHandler)
 router.get('/dl/:version/:combo', downloadHandler)

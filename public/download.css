@@ -59,7 +59,7 @@
   display: inline-block;
   vertical-align: top;
   width: 300px;
-  min-height: 212px;
+  min-height: 234px;
   margin: 14px 14px 0 0;
   padding: 16px 18px 64px;
   border: 1px solid #e6e9ef;
@@ -80,6 +80,23 @@
   bottom: 16px;
   margin: 0;
 }
+
+/* 校验码：看起来像行内代码，但必须可点（点一下复制完整值）。
+   用 button 而不是 span，是为了有原生可点区域与键盘可达性。 */
+.sha {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #6b7488;
+  font-family: Consolas, Monaco, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.sha:hover { color: #2f6fed; text-decoration: underline; }
+.sha:active { color: #1f5cd0; }
+.sha.copied { color: #1f8a4c; text-decoration: none; }
 
 .tip {
   margin-top: 14px;
@@ -191,3 +208,7 @@
 @media (max-height: 520px) {
   .dl-notice-box { margin-top: 36px; }
 }
+
+/* 历史表的「下载 / 校验码」格：两个动作放同一行，别让「校验码」被挤到下一行 */
+.dl-cell { white-space: nowrap; }
+.dl-cell .sha { margin-left: 8px; }
